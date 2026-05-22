@@ -1,0 +1,108 @@
+[project]
+name = "mcgram"
+version = "0.1.0"
+description = "Telegram bridge for Claude Code — send notifications, ask short questions, set reminders via personal Telegram bot."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [
+    { name = "tvtdev94" },
+]
+keywords = [
+    "mcp",
+    "model-context-protocol",
+    "claude",
+    "claude-code",
+    "ai",
+    "telegram",
+    "bot",
+    "notifications",
+    "reminders",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Communications :: Chat",
+    "Topic :: Software Development :: Libraries",
+    "Typing :: Typed",
+]
+dependencies = [
+    "mcp>=1.0,<2.0",
+    "httpx>=0.27",
+    "pydantic>=2.5",
+    "pydantic-settings>=2.0",
+    "pyyaml>=6.0",
+    "python-dotenv>=1.0",
+    "tzdata>=2024.1; sys_platform == 'win32'",
+]
+
+[project.urls]
+Homepage = "https://github.com/tvtdev94/mcgram"
+Repository = "https://github.com/tvtdev94/mcgram"
+Issues = "https://github.com/tvtdev94/mcgram/issues"
+Documentation = "https://github.com/tvtdev94/mcgram#readme"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "pytest-asyncio>=0.23",
+    "pytest-timeout>=2.3",
+    "pytest-httpx>=0.30",
+    "ruff>=0.4",
+    "mypy>=1.10",
+]
+
+[project.scripts]
+mcgram = "mcgram.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mcgram"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "SIM"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+asyncio_mode = "auto"
+markers = [
+    "integration: requires real Telegram bot token",
+]
+
+[tool.coverage.run]
+parallel = true
+source = ["src/mcgram"]
+branch = false
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+no_implicit_optional = true
+ignore_missing_imports = true

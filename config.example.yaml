@@ -1,0 +1,34 @@
+# mcgram config — copy to ~/.mcgram/config.yaml (or set MCGRAM_CONFIG=/path/to/file).
+# Token NEVER goes here — it lives in ~/.mcgram/.env as MCGRAM_BOT_TOKEN=...
+
+bot:
+  token_env: MCGRAM_BOT_TOKEN     # name of env var holding the BotFather token
+  operator_chat_id: 0             # REQUIRED — your personal chat ID (integer)
+
+defaults:
+  parse_mode: plain               # plain | markdown_v2 (default plain)
+  ask_timeout_s: 120              # default per-ask wait (1..600)
+  rate_limit_per_min: 20          # per-tool token bucket capacity
+
+limits:
+  ask_timeout_max_s: 600          # hard cap on ask timeout
+  reminder_max_delay_s: 86400     # 24h cap on reminder delay
+  reminder_max_pending: 10        # max concurrent in-flight reminders
+  file_max_bytes: 52428800        # 50 MB send_file cap (Telegram limit ~50 MB)
+  ask_options_max: 6              # max inline-keyboard buttons per ask
+  caption_max_chars: 1024         # Telegram caption hard limit
+  reminder_text_max_chars: 1000   # abuse guard
+
+audit:
+  path: ~/.mcgram/audit.jsonl
+  rotate_mb: 25                    # rotates current -> .1 -> .2 -> .3 (oldest dropped)
+  redact_text: false               # true: outbound `text` replaced with "<redacted>"
+  retention_days: null             # e.g. 14 -> auto-prune entries older than 14 days
+  timezone: UTC                    # IANA name, e.g. "Asia/Ho_Chi_Minh"
+
+# When false (default) send_file rejects paths outside the CWD (anti path-traversal).
+# Set true ONLY if you trust the caller — Claude Code can ask to send any file on disk.
+allow_outside_cwd: false
+
+# Override only for testing against a mock server.
+# api_root: https://api.telegram.org
