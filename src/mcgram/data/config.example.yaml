@@ -1,9 +1,21 @@
 # mcgram config — copy to ~/.mcgram/config.yaml (or set MCGRAM_CONFIG=/path/to/file).
-# Token NEVER goes here — it lives in ~/.mcgram/.env as MCGRAM_BOT_TOKEN=...
+# At least ONE transport must be configured (ntfy or bot, or both).
 
-bot:
-  token_env: MCGRAM_BOT_TOKEN     # name of env var holding the BotFather token
-  operator_chat_id: 0             # REQUIRED — your personal chat ID (integer)
+# === Transport A: ntfy.sh (fastest, no token) =============================
+# Subscribe to `default_topic` from the ntfy mobile app / web UI to receive pings.
+# Topic is auto-generated on `mcgram init` — keep it secret-ish (anyone with the
+# URL can subscribe). For sensitive data, self-host ntfy and set `server:`.
+ntfy:
+  server: https://ntfy.sh
+  default_topic: {{NTFY_TOPIC}}
+  # access_token_env: NTFY_TOKEN     # only for ntfy paid/self-hosted with auth
+
+# === Transport B: Telegram (enables 2-way `ask`) ==========================
+# Uncomment + fill in to enable. Token NEVER goes here — it lives in
+# ~/.mcgram/.env as MCGRAM_BOT_TOKEN=...
+# bot:
+#   token_env: MCGRAM_BOT_TOKEN
+#   operator_chat_id: 0             # your personal chat ID (integer)
 
 defaults:
   parse_mode: plain               # plain | markdown_v2 (default plain)
@@ -14,7 +26,8 @@ limits:
   ask_timeout_max_s: 600          # hard cap on ask timeout
   reminder_max_delay_s: 86400     # 24h cap on reminder delay
   reminder_max_pending: 10        # max concurrent in-flight reminders
-  file_max_bytes: 52428800        # 50 MB send_file cap (Telegram limit ~50 MB)
+  file_max_bytes: 52428800        # 50 MB hard cap (Telegram limit)
+  ntfy_file_max_bytes: 15728640   # 15 MB effective cap for ntfy channels (public free tier)
   ask_options_max: 6              # max inline-keyboard buttons per ask
   caption_max_chars: 1024         # Telegram caption hard limit
   reminder_text_max_chars: 1000   # abuse guard
@@ -30,5 +43,17 @@ audit:
 # Set true ONLY if you trust the caller — Claude Code can ask to send any file on disk.
 allow_outside_cwd: false
 
-# Override only for testing against a mock server.
+# === Named channels (optional) ============================================
+# Add extra destinations beyond the auto-created `default`. Each channel
+# declares its transport. Example:
+#
+# channels:
+#   alerts:
+#     transport: ntfy
+#     ntfy_topic: mcgram-alerts-x9k2
+#   team:
+#     transport: telegram
+#     chat_id: -1001234567890
+
+# Override only for testing against a mock Telegram server.
 # api_root: https://api.telegram.org

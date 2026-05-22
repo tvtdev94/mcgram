@@ -15,7 +15,7 @@ def test_version(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[
     main()
     out = capsys.readouterr().out
     assert "mcgram" in out
-    assert "0.1.0" in out
+    assert "0.2.0" in out
 
 
 def test_help(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import secrets
 import shutil
 import subprocess
 from importlib import resources
@@ -16,26 +17,38 @@ def _bundled_config_yaml() -> str:
     return data.read_text(encoding="utf-8")
 
 
+def _generate_topic() -> str:
+    """Return a random ntfy topic: `mcgram-<16-hex>` (64-bit entropy)."""
+    return f"mcgram-{secrets.token_hex(8)}"
+
+
 _ENV_TEMPLATE = (
     "# mcgram credentials — never commit.\n"
-    "# Get token from @BotFather on Telegram (/newbot).\n"
+    "# Only needed if you enable Telegram transport (uncomment `bot:` in config.yaml).\n"
+    "# Get a token from @BotFather on Telegram (/newbot).\n"
     "MCGRAM_BOT_TOKEN=\n"
+    "# NTFY_TOKEN=  # only for ntfy paid/self-hosted with auth\n"
 )
 
 
 _NEXT_STEPS = """\
 
-Next steps:
-  1. Get a bot token from @BotFather on Telegram (/newbot)
-     (VI: gõ /newbot, đặt tên, copy token)
-  2. Get your chat ID:
-       - Open Telegram, /start your new bot
-       - Visit: https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates
-       - Copy `chat.id` from the JSON
-  3. Edit {env}  → paste MCGRAM_BOT_TOKEN
-  4. Edit {cfg} → set operator_chat_id
-  5. Test:  mcgram doctor
-  6. Restart Claude Code → /mcp → mcgram appears
+Next steps — choose ONE (or both):
+
+  [A] ntfy.sh (fastest, ~30 seconds, no token required):
+    1. Install the ntfy app: https://ntfy.sh/  (iOS / Android / Web)
+    2. In the app, subscribe to topic:  {topic}
+       (server: {server})
+    3. Verify:  mcgram doctor
+    4. Restart Claude Code -> /mcp -> mcgram appears -> done
+
+  [B] Telegram (required for 2-way `ask` tool):
+    1. Talk to @BotFather -> /newbot -> copy token
+    2. Get your chat ID: /start the bot, then visit
+       https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates  -> copy `chat.id`
+    3. Edit {env}        -> set MCGRAM_BOT_TOKEN
+    4. Edit {cfg}        -> uncomment `bot:` block, set operator_chat_id
+    5. Verify:  mcgram doctor
 """
 
 
@@ -98,6 +111,27 @@ def _register_with_claude_code(cfg: Path, *, force: bool) -> None:
             print(f"            stderr: {result.stderr.strip()[:200]}")
 
 
+def _render_config_template(topic: str) -> str:
+    """Substitute placeholder topic into the bundled config template."""
+    return _bundled_config_yaml().replace("{{NTFY_TOPIC}}", topic)
+
+
+def _read_existing_topic(cfg: Path) -> str | None:
+    """Best-effort: pull ntfy.default_topic out of an already-scaffolded config.
+
+    Used so the printed `Next steps` references the SAME topic that's actually
+    in config when init is run idempotently.
+    """
+    try:
+        import yaml as _yaml  # local import to keep startup fast on --help
+        raw = _yaml.safe_load(cfg.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return None
+    ntfy = (raw.get("ntfy") or {}) if isinstance(raw, dict) else {}
+    topic = ntfy.get("default_topic") if isinstance(ntfy, dict) else None
+    return str(topic) if isinstance(topic, str) and topic else None
+
+
 def init_config(*, force: bool = False) -> int:
     """Scaffold ~/.mcgram/, install skill, register MCP. Idempotent."""
     home = Path.home() / ".mcgram"
@@ -109,9 +143,11 @@ def init_config(*, force: bool = False) -> int:
     skipped: list[str] = []
 
     if not cfg.exists() or force:
-        cfg.write_text(_bundled_config_yaml(), encoding="utf-8")
+        topic = _generate_topic()
+        cfg.write_text(_render_config_template(topic), encoding="utf-8")
         created.append(str(cfg))
     else:
+        topic = _read_existing_topic(cfg) or "<not set in config>"
         skipped.append(str(cfg))
 
     if not env.exists() or force:
@@ -128,5 +164,7 @@ def init_config(*, force: bool = False) -> int:
     install_skill(quiet=False, force=force)
     _register_with_claude_code(cfg, force=force)
 
-    print(_NEXT_STEPS.format(env=env, cfg=cfg))
+    print(_NEXT_STEPS.format(
+        env=env, cfg=cfg, topic=topic, server="https://ntfy.sh",
+    ))
     return 0

@@ -1,4 +1,8 @@
-"""Tool: ask — post a question, await answer (button/freetext) or timeout."""
+"""Tool: ask — post a question, await answer (button/freetext) or timeout.
+
+Telegram-only: ntfy.sh has no 2-way input. Calls on ntfy channels return
+`transport_unsupported` without contacting any backend.
+"""
 
 from __future__ import annotations
 
@@ -18,7 +22,8 @@ def schema() -> dict[str, Any]:
             "Post a question to a configured Telegram channel and wait for a reply. "
             "Returns {value, source: button|freetext|timeout, question_id}. "
             "If options provided, posts inline buttons (1 per row). "
-            "Blocks the MCP call until reply or timeout — keep timeout_s short."
+            "Blocks the MCP call until reply or timeout — keep timeout_s short. "
+            "REQUIRES a telegram channel; ntfy channels are not supported."
         ),
         "inputSchema": {
             "type": "object",
@@ -36,7 +41,7 @@ def schema() -> dict[str, Any]:
                 },
                 "channel": {
                     "type": "string",
-                    "description": "Named channel from config (default: 'default')",
+                    "description": "Named channel from config (must be telegram)",
                 },
             },
             "required": ["question"],
@@ -69,14 +74,29 @@ async def handle(
     if effective_timeout > limits.ask_timeout_max_s:
         effective_timeout = limits.ask_timeout_max_s
 
-    if state.ask_registry is None:
-        return {"error": "internal", "reason": "ask_registry_not_initialized"}
     try:
-        chat_id = state.settings.resolve_channel(channel)
+        dest = state.settings.resolve_destination(channel)
     except ConfigError as e:
         state.audit.write({"tool": TOOL_NAME, "status": "rejected",
                            "reason": "unknown_channel", "channel": channel})
         return {"error": "invalid_input", "reason": "unknown_channel", "detail": str(e)}
+
+    if dest.transport != "telegram":
+        state.audit.write({
+            "tool": TOOL_NAME, "status": "rejected",
+            "reason": "transport_unsupported",
+            "channel": dest.name, "transport": dest.transport,
+        })
+        return {
+            "error": "transport_unsupported",
+            "reason": "ask requires a telegram channel (ntfy.sh has no 2-way input)",
+            "channel": dest.name,
+            "hint": "use send_message on this channel, or switch to a telegram channel",
+        }
+
+    if state.ask_registry is None or state.client is None:
+        return {"error": "internal", "reason": "ask_registry_not_initialized"}
+    assert dest.chat_id is not None
     if not state.rate.try_acquire(TOOL_NAME):
         state.audit.write({"tool": TOOL_NAME, "status": "rejected", "reason": "rate_limit"})
         raise RateLimitError(TOOL_NAME)
@@ -85,7 +105,7 @@ async def handle(
     try:
         result = await state.ask_registry.open(
             state.client,
-            chat_id=chat_id,
+            chat_id=dest.chat_id,
             question=question,
             options=options,
             timeout_s=effective_timeout,
@@ -98,10 +118,10 @@ async def handle(
     ms = int((time.monotonic() - t0) * 1000)
     state.audit.write({
         "tool": TOOL_NAME, "status": "ok",
-        "channel": channel or "default",
+        "channel": dest.name, "transport": "telegram",
         "question_id": result["question_id"],
         "source": result["source"],
         "ms": ms,
     })
-    result["channel"] = channel or "default"
+    result["channel"] = dest.name
     return result

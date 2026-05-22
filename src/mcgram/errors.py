@@ -47,3 +47,12 @@ class TelegramError(MCGramError):
         super().__init__(f"telegram_api: {status} {description}")
         self.status = status
         self.description = description
+
+
+class NtfyError(MCGramError):
+    """ntfy.sh HTTP API returned a non-2xx response."""
+
+    def __init__(self, status: int, description: str) -> None:
+        super().__init__(f"ntfy_api: {status} {description}")
+        self.status = status
+        self.description = description

@@ -7,15 +7,19 @@ import sys
 from . import __version__
 
 _HELP = """\
-mcgram — Telegram bridge MCP for Claude Code.
+mcgram — notification bridge MCP for Claude Code (Telegram + ntfy.sh).
 
 USAGE:
   mcgram                          start the MCP stdio server (expects MCGRAM_CONFIG)
   mcgram init [--force]           scaffold ~/.mcgram/ + install Claude Code skill
-  mcgram doctor                   check config + bot connectivity (sends a test message)
+  mcgram doctor                   check config + transport connectivity (sends test pings)
   mcgram audit [opts]             analyze audit.jsonl (--since, --tool, --rejected, --tail)
-  mcgram channel <action> [...]   manage named channels (list | add NAME CHAT_ID | remove NAME)
+  mcgram channel list             list configured channels (both transports)
+  mcgram channel add NAME CHAT_ID add a Telegram channel
+  mcgram channel add-ntfy NAME    add a ntfy.sh channel (auto-generates topic)
+  mcgram channel remove NAME      remove a channel
   mcgram install-skill [--force]  install / reinstall ~/.claude/skills/mcgram/SKILL.md
+  mcgram clear-lock               remove stale ~/.mcgram/.lock (use if MCP fails to start)
   mcgram --version                print version
   mcgram --help                   print this help
 """
@@ -48,6 +52,15 @@ def main() -> None:
             from .skill_installer import install_skill
             force = "--force" in args[1:]
             sys.exit(install_skill(force=force))
+        if first == "clear-lock":
+            from pathlib import Path
+            lock = Path("~/.mcgram/.lock").expanduser()
+            if lock.exists():
+                lock.unlink()
+                print(f"removed  {lock}")
+            else:
+                print(f"no lock file at {lock} (already clean)")
+            sys.exit(0)
         print(f"unknown argument: {first}. Try `mcgram --help`.", file=sys.stderr)
         sys.exit(2)
     # No args → run MCP stdio server.

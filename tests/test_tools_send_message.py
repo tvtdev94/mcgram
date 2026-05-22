@@ -26,7 +26,9 @@ async def test_happy_path(app_state: AppState, httpx_mock) -> None:
         json={"ok": True, "result": {"message_id": 99}},
     )
     out = await send_message.handle(app_state, text="hello")
-    assert out == {"ok": True, "message_id": 99, "channel": "default"}
+    assert out == {
+        "ok": True, "message_id": 99, "channel": "default", "transport": "telegram",
+    }
     records = _audit_records(app_state.audit.path)
     assert records[0]["tool"] == "send_message"
     assert records[0]["status"] == "ok"

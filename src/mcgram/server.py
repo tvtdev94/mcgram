@@ -20,6 +20,7 @@ from .audit import AuditLog
 from .config import Settings
 from .errors import MCGramError
 from .lock import SingleInstanceLock
+from .ntfy_client import NtfyClient
 from .polling import poll_loop
 from .rate_limiter import RateLimiter
 from .runtime import AppState
@@ -49,6 +50,10 @@ async def _serve(state: AppState) -> None:
     server: Server = Server(SERVER_NAME)
     modules = _phase2_tool_modules()
     if state.ask_registry is not None:
+        from .tools import ask, cancel_reminder, list_reminders, set_reminder
+        modules += [ask, set_reminder, cancel_reminder, list_reminders]
+    elif state.reminders is not None:
+        # Reminders may still work over ntfy even without ask_registry
         from .tools import ask, cancel_reminder, list_reminders, set_reminder
         modules += [ask, set_reminder, cancel_reminder, list_reminders]
     schemas = [Tool(**m.schema()) for m in modules]
@@ -95,7 +100,6 @@ async def _run() -> None:
     settings_path_str = _resolve_config_path_str()
     _load_env_beside_config(Path(settings_path_str))
     settings = Settings.load(settings_path_str)
-    token = settings.resolve_token()
     audit = AuditLog(
         settings.audit.path,
         rotate_mb=settings.audit.rotate_mb,
@@ -112,40 +116,80 @@ async def _run() -> None:
         else SingleInstanceLock(settings.lock_path)
     )
     with lock_ctx:
-        async with TelegramClient(token, api_root=settings.api_root) as client:
+        async with _build_clients(settings) as (tg_client, ntfy_client):
             state = AppState(
                 settings=settings,
-                client=client,
                 dispatcher=dispatcher,
                 rate=rate,
                 audit=audit,
+                client=tg_client,
+                ntfy_client=ntfy_client,
             )
             _wire_phase3(state)
-            poll_task = asyncio.create_task(
-                poll_loop(client, dispatcher, settings.bot.operator_chat_id, audit),
-                name="mcgram-poll",
-            )
+            poll_task: asyncio.Task | None = None
+            if tg_client is not None and not settings.bot.disable_polling:  # type: ignore[union-attr]
+                poll_task = asyncio.create_task(
+                    poll_loop(
+                        tg_client, dispatcher,
+                        settings.bot.operator_chat_id,  # type: ignore[union-attr]
+                        audit,
+                    ),
+                    name="mcgram-poll",
+                )
+            elif tg_client is None:
+                log.info(
+                    "no `bot` section in config — Telegram polling disabled "
+                    "(ntfy-only mode)."
+                )
+            else:
+                log.info(
+                    "bot.disable_polling = true — Telegram polling skipped "
+                    "(send-only on this machine)."
+                )
             try:
                 await _serve(state)
             finally:
-                poll_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await poll_task
+                if poll_task is not None:
+                    poll_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await poll_task
                 _shutdown_phase3(state)
 
 
+@contextlib.asynccontextmanager
+async def _build_clients(settings: Settings):
+    """Enter context for whichever transport clients are configured."""
+    tg_client: TelegramClient | None = None
+    ntfy_client: NtfyClient | None = None
+    async with contextlib.AsyncExitStack() as stack:
+        if settings.bot is not None:
+            token = settings.resolve_token()
+            tg_client = await stack.enter_async_context(
+                TelegramClient(token, api_root=settings.api_root)
+            )
+        if settings.ntfy is not None:
+            ntfy_token = settings._resolve_ntfy_token()  # noqa: SLF001
+            ntfy_client = await stack.enter_async_context(
+                NtfyClient(settings.ntfy.server, access_token=ntfy_token)
+            )
+        yield tg_client, ntfy_client
+
+
 def _wire_phase3(state: AppState) -> None:
-    """Attach ask registry + reminder scheduler when Phase 3 modules are present."""
+    """Attach ask registry (Telegram-only) and reminder scheduler."""
     try:
         from .ask_registry import AskRegistry
         from .reminders import ReminderScheduler
     except ImportError:
         return
-    registry = AskRegistry()
-    registry.set_answer_hook(state.client.answer_callback_query)
-    state.ask_registry = registry
-    state.reminders = ReminderScheduler(state.client, state.settings, state.audit)
-    state.dispatcher.register(state.ask_registry.handle_update)
+    if state.client is not None:
+        registry = AskRegistry()
+        registry.set_answer_hook(state.client.answer_callback_query)
+        state.ask_registry = registry
+        state.dispatcher.register(state.ask_registry.handle_update)
+    state.reminders = ReminderScheduler(
+        state.client, state.settings, state.audit, ntfy_client=state.ntfy_client,
+    )
 
 
 def _shutdown_phase3(state: AppState) -> None:

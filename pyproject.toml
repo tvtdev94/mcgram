@@ -1,7 +1,7 @@
 [project]
 name = "mcgram"
-version = "0.1.0"
-description = "Telegram bridge for Claude Code — send notifications, ask short questions, set reminders via personal Telegram bot."
+version = "0.2.0"
+description = "Notification bridge for Claude Code (Telegram + ntfy.sh) — send notifications, ask short questions, set reminders via Telegram bot or ntfy.sh topic."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
@@ -15,6 +15,8 @@ keywords = [
     "claude-code",
     "ai",
     "telegram",
+    "ntfy",
+    "push-notifications",
     "bot",
     "notifications",
     "reminders",

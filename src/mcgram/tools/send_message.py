@@ -1,22 +1,23 @@
-"""Tool: send_message — post text to the operator chat."""
+"""Tool: send_message — post text to the operator chat (telegram or ntfy)."""
 
 from __future__ import annotations
 
 import time
 from typing import Any
 
-from ..errors import ConfigError, RateLimitError, TelegramError
+from ..dispatch import send_text
+from ..errors import ConfigError, NtfyError, RateLimitError, TelegramError
 from ..runtime import AppState
 
 TOOL_NAME = "send_message"
-_MAX_TEXT = 4096  # Telegram hard cap
+_MAX_TEXT = 4096  # Telegram hard cap (ntfy allows more; keep unified)
 
 
 def schema() -> dict[str, Any]:
     return {
         "name": TOOL_NAME,
         "description": (
-            "Send a text message to a configured Telegram channel. "
+            "Send a text message to a configured channel (Telegram or ntfy.sh). "
             "Use for progress updates, completion pings, error reports."
         ),
         "inputSchema": {
@@ -35,7 +36,7 @@ def schema() -> dict[str, Any]:
                 "parse_mode": {
                     "type": "string",
                     "enum": ["plain", "markdown_v2"],
-                    "description": "Override config default. 'plain' means no parse_mode.",
+                    "description": "Telegram-only override. ntfy channels ignore.",
                 },
             },
             "required": ["text"],
@@ -51,7 +52,7 @@ async def handle(state: AppState, *, text: str, channel: str | None = None,
     if len(text) > _MAX_TEXT:
         return {"error": "invalid_input", "reason": "text_too_long", "max": _MAX_TEXT}
     try:
-        chat_id = state.settings.resolve_channel(channel)
+        dest = state.settings.resolve_destination(channel)
     except ConfigError as e:
         state.audit.write({"tool": TOOL_NAME, "status": "rejected",
                            "reason": "unknown_channel", "channel": channel})
@@ -64,24 +65,30 @@ async def handle(state: AppState, *, text: str, channel: str | None = None,
     api_parse_mode = "MarkdownV2" if mode == "markdown_v2" else None
     t0 = time.monotonic()
     try:
-        msg = await state.client.send_message(
-            chat_id,
-            text,
-            parse_mode=api_parse_mode,
-            disable_notification=silent,
+        sent = await send_text(
+            state, dest, text,
+            silent=silent,
+            parse_mode=api_parse_mode if dest.transport == "telegram" else None,
         )
-    except TelegramError as e:
+    except (TelegramError, NtfyError) as e:
         state.audit.write({
-            "tool": TOOL_NAME, "status": "error", "chat_id": chat_id,
-            "text_len": len(text), "error": e.description,
+            "tool": TOOL_NAME, "status": "error",
+            "transport": dest.transport, "channel": dest.name,
+            "text_len": len(text), "error": getattr(e, "description", str(e)),
         })
-        return {"error": "telegram_api", "reason": e.description}
+        return {"error": f"{dest.transport}_api",
+                "reason": getattr(e, "description", str(e))}
+    except ConfigError as e:
+        state.audit.write({"tool": TOOL_NAME, "status": "rejected",
+                           "reason": "transport_unavailable", "channel": dest.name})
+        return {"error": "transport_unavailable", "reason": str(e)}
     ms = int((time.monotonic() - t0) * 1000)
     state.audit.write({
-        "tool": TOOL_NAME, "status": "ok", "chat_id": chat_id,
-        "channel": channel or "default",
+        "tool": TOOL_NAME, "status": "ok",
+        "transport": dest.transport, "channel": dest.name,
+        "chat_id": dest.chat_id, "ntfy_topic": dest.ntfy_topic,
         "text": text, "text_len": len(text), "ms": ms,
-        "message_id": msg.get("message_id"),
+        "message_id": sent["message_id"],
     })
-    return {"ok": True, "message_id": msg.get("message_id"),
-            "channel": channel or "default"}
+    return {"ok": True, "message_id": sent["message_id"],
+            "channel": dest.name, "transport": dest.transport}

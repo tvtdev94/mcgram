@@ -1,4 +1,4 @@
-"""Tool: send_file — upload a local file to the operator chat."""
+"""Tool: send_file — upload a local file to the operator chat (telegram or ntfy)."""
 
 from __future__ import annotations
 
@@ -7,7 +7,8 @@ import time
 from pathlib import Path
 from typing import Any
 
-from ..errors import ConfigError, RateLimitError, TelegramError
+from ..dispatch import send_document
+from ..errors import ConfigError, NtfyError, RateLimitError, TelegramError
 from ..runtime import AppState
 
 TOOL_NAME = "send_file"
@@ -17,7 +18,7 @@ def schema() -> dict[str, Any]:
     return {
         "name": TOOL_NAME,
         "description": (
-            "Send a local file as an attachment to a configured Telegram channel. "
+            "Send a local file as an attachment to a configured channel. "
             "Use for logs, screenshots, generated artifacts. Path must be inside CWD "
             "unless config sets allow_outside_cwd: true."
         ),
@@ -67,16 +68,19 @@ async def handle(state: AppState, *, path: str, channel: str | None = None,
                  silent: bool = False) -> dict[str, Any]:
     limits = state.settings.limits
     try:
-        chat_id = state.settings.resolve_channel(channel)
+        dest = state.settings.resolve_destination(channel)
     except ConfigError as e:
         state.audit.write({"tool": TOOL_NAME, "status": "rejected",
                            "reason": "unknown_channel", "channel": channel})
         return {"error": "invalid_input", "reason": "unknown_channel", "detail": str(e)}
 
+    max_bytes = limits.file_max_bytes
+    if dest.transport == "ntfy":
+        max_bytes = min(max_bytes, limits.ntfy_file_max_bytes)
     resolved, err = _validate_path(
         path,
         allow_outside_cwd=state.settings.allow_outside_cwd,
-        max_bytes=limits.file_max_bytes,
+        max_bytes=max_bytes,
     )
     if err is not None:
         state.audit.write({"tool": TOOL_NAME, "status": "rejected", **err})
@@ -93,21 +97,27 @@ async def handle(state: AppState, *, path: str, channel: str | None = None,
     size = os.path.getsize(resolved)
     t0 = time.monotonic()
     try:
-        msg = await state.client.send_document(
-            chat_id, resolved, caption=caption, disable_notification=silent
-        )
-    except TelegramError as e:
+        sent = await send_document(state, dest, resolved, caption=caption, silent=silent)
+    except (TelegramError, NtfyError) as e:
         state.audit.write({
-            "tool": TOOL_NAME, "status": "error", "bytes": size,
-            "path": str(resolved), "error": e.description,
+            "tool": TOOL_NAME, "status": "error",
+            "transport": dest.transport, "channel": dest.name,
+            "bytes": size, "path": str(resolved),
+            "error": getattr(e, "description", str(e)),
         })
-        return {"error": "telegram_api", "reason": e.description}
+        return {"error": f"{dest.transport}_api",
+                "reason": getattr(e, "description", str(e))}
+    except ConfigError as e:
+        state.audit.write({"tool": TOOL_NAME, "status": "rejected",
+                           "reason": "transport_unavailable", "channel": dest.name})
+        return {"error": "transport_unavailable", "reason": str(e)}
     ms = int((time.monotonic() - t0) * 1000)
     state.audit.write({
-        "tool": TOOL_NAME, "status": "ok", "chat_id": chat_id,
-        "channel": channel or "default",
+        "tool": TOOL_NAME, "status": "ok",
+        "transport": dest.transport, "channel": dest.name,
+        "chat_id": dest.chat_id, "ntfy_topic": dest.ntfy_topic,
         "bytes": size, "path": str(resolved), "ms": ms,
-        "message_id": msg.get("message_id"),
+        "message_id": sent["message_id"],
     })
-    return {"ok": True, "message_id": msg.get("message_id"), "bytes": size,
-            "channel": channel or "default"}
+    return {"ok": True, "message_id": sent["message_id"], "bytes": size,
+            "channel": dest.name, "transport": dest.transport}
