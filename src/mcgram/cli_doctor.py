@@ -38,6 +38,13 @@ async def _check_telegram(settings: Settings, rows: list[str]) -> int:
         token = settings.resolve_token()
         rows.append(_ok("telegram token", _mask(token)))
     except ConfigError as e:
+        if settings.bot.disable_polling:
+            rows.append(_skip(
+                "telegram",
+                f"bot.disable_polling = true and {settings.bot.token_env} unset "
+                "— Telegram disabled on this machine (intentional)",
+            ))
+            return 0
         rows.append(_fail("telegram token", str(e)))
         return 1
 

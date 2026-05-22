@@ -62,6 +62,35 @@ def test_happy_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     assert "PASS" in out
 
 
+def test_missing_token_with_disable_polling_skips_telegram_not_fail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """When the user opted out of Telegram (disable_polling=true) and the
+    token isn't set, doctor should SKIP telegram and PASS (assuming ntfy works
+    or is absent)."""
+    cfg = tmp_path / "config.yaml"
+    audit = tmp_path / "audit.jsonl"
+    cfg.write_text(
+        f"""
+bot:
+  token_env: TEST_TOKEN
+  operator_chat_id: 42
+  disable_polling: true
+audit:
+  path: {audit.as_posix()}
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("MCGRAM_CONFIG", str(cfg))
+    monkeypatch.delenv("TEST_TOKEN", raising=False)
+    rc = doctor()
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "[SKIP] telegram" in out
+    assert "PASS" in out
+
+
 def test_get_me_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
                       capsys: pytest.CaptureFixture[str], httpx_mock) -> None:
     cfg = tmp_path / "config.yaml"

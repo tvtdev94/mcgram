@@ -3,13 +3,22 @@
 from __future__ import annotations
 
 import contextlib
+import os
 import secrets
 import shutil
 import subprocess
 from importlib import resources
 from pathlib import Path
 
+import httpx
+
 from .skill_installer import install_skill
+
+_WELCOME_TEXT = (
+    "mcgram installed! If you can see this notification, the ntfy bridge works. "
+    "Claude Code can now ping this device when long tasks finish, send logs, "
+    "and (with Telegram) ask you yes/no questions."
+)
 
 
 def _bundled_config_yaml() -> str:
@@ -116,6 +125,38 @@ def _render_config_template(topic: str) -> str:
     return _bundled_config_yaml().replace("{{NTFY_TOPIC}}", topic)
 
 
+def _seed_ntfy_subscription(server: str, topic: str) -> None:
+    """POST a welcome message so the topic exists server-side and the user's
+    fresh subscription has something to display. Silent on network failure —
+    init should never fail because ntfy is briefly unreachable.
+
+    Set MCGRAM_INIT_NO_WELCOME=1 to skip (used by tests + air-gapped installs).
+    """
+    if os.environ.get("MCGRAM_INIT_NO_WELCOME", "").strip().lower() in {"1", "true", "yes"}:
+        return
+    url = f"{server.rstrip('/')}/{topic}"
+    try:
+        r = httpx.post(
+            url,
+            content=_WELCOME_TEXT.encode("utf-8"),
+            headers={"Title": "mcgram welcome", "Tags": "wave,sparkles"},
+            timeout=5.0,
+        )
+    except httpx.HTTPError as e:
+        print(
+            f"warning  could not seed ntfy topic ({type(e).__name__}); "
+            "subscription will still work"
+        )
+        return
+    if r.status_code == 200:
+        print(f"seeded   welcome message published to {url}")
+    else:
+        print(
+            f"warning  ntfy returned HTTP {r.status_code} when seeding topic — "
+            "subscription will still work"
+        )
+
+
 def _read_existing_topic(cfg: Path) -> str | None:
     """Best-effort: pull ntfy.default_topic out of an already-scaffolded config.
 
@@ -142,10 +183,12 @@ def init_config(*, force: bool = False) -> int:
     created: list[str] = []
     skipped: list[str] = []
 
+    fresh_scaffold = False
     if not cfg.exists() or force:
         topic = _generate_topic()
         cfg.write_text(_render_config_template(topic), encoding="utf-8")
         created.append(str(cfg))
+        fresh_scaffold = True
     else:
         topic = _read_existing_topic(cfg) or "<not set in config>"
         skipped.append(str(cfg))
@@ -163,6 +206,9 @@ def init_config(*, force: bool = False) -> int:
 
     install_skill(quiet=False, force=force)
     _register_with_claude_code(cfg, force=force)
+
+    if fresh_scaffold and topic.startswith("mcgram-"):
+        _seed_ntfy_subscription("https://ntfy.sh", topic)
 
     print(_NEXT_STEPS.format(
         env=env, cfg=cfg, topic=topic, server="https://ntfy.sh",

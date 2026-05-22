@@ -18,7 +18,7 @@ from mcp.types import TextContent, Tool
 from . import __version__
 from .audit import AuditLog
 from .config import Settings
-from .errors import MCGramError
+from .errors import ConfigError, MCGramError
 from .lock import SingleInstanceLock
 from .ntfy_client import NtfyClient
 from .polling import poll_loop
@@ -158,15 +158,31 @@ async def _run() -> None:
 
 @contextlib.asynccontextmanager
 async def _build_clients(settings: Settings):
-    """Enter context for whichever transport clients are configured."""
+    """Enter context for whichever transport clients are configured.
+
+    When `bot:` is present but the token is unavailable, this is fatal UNLESS
+    `bot.disable_polling = true` — that combo means "config is portable; this
+    machine just can't reach Telegram", so we boot ntfy-only and log a warning.
+    """
     tg_client: TelegramClient | None = None
     ntfy_client: NtfyClient | None = None
     async with contextlib.AsyncExitStack() as stack:
         if settings.bot is not None:
-            token = settings.resolve_token()
-            tg_client = await stack.enter_async_context(
-                TelegramClient(token, api_root=settings.api_root)
-            )
+            try:
+                token = settings.resolve_token()
+            except ConfigError:
+                if settings.bot.disable_polling:
+                    log.warning(
+                        "bot.disable_polling = true and %s is unset — "
+                        "skipping Telegram client (send to telegram channels will fail).",
+                        settings.bot.token_env,
+                    )
+                else:
+                    raise
+            else:
+                tg_client = await stack.enter_async_context(
+                    TelegramClient(token, api_root=settings.api_root)
+                )
         if settings.ntfy is not None:
             ntfy_token = settings._resolve_ntfy_token()  # noqa: SLF001
             ntfy_client = await stack.enter_async_context(

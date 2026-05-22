@@ -62,5 +62,44 @@ def test_env_bool() -> None:
     assert server_module._env_bool("___not_set___") is False
 
 
-# unused-import silencer
-_ = asyncio
+def test_build_clients_skips_telegram_when_token_missing_and_polling_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`disable_polling: true` with missing token must NOT crash startup —
+    fallback to ntfy-only and log a warning."""
+    monkeypatch.delenv("MCGRAM_BOT_TOKEN", raising=False)
+    from mcgram.config import BotConfig, NtfyConfig, Settings
+
+    settings = Settings(
+        bot=BotConfig(token_env="MCGRAM_BOT_TOKEN",
+                      operator_chat_id=1, disable_polling=True),
+        ntfy=NtfyConfig(server="https://ntfy.sh", default_topic="mcgram-test"),
+    )
+
+    async def _exercise() -> tuple:
+        async with server_module._build_clients(settings) as pair:
+            return pair
+
+    tg, nt = asyncio.run(_exercise())
+    assert tg is None
+    assert nt is not None
+
+
+def test_build_clients_raises_when_token_missing_and_polling_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without `disable_polling`, missing token must still be fatal."""
+    monkeypatch.delenv("MCGRAM_BOT_TOKEN", raising=False)
+    from mcgram.config import BotConfig, NtfyConfig, Settings
+
+    settings = Settings(
+        bot=BotConfig(token_env="MCGRAM_BOT_TOKEN", operator_chat_id=1),
+        ntfy=NtfyConfig(server="https://ntfy.sh", default_topic="mcgram-test"),
+    )
+
+    async def _exercise() -> None:
+        async with server_module._build_clients(settings):
+            pass
+
+    with pytest.raises(ConfigError):
+        asyncio.run(_exercise())
