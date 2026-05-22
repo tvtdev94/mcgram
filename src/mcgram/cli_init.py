@@ -1,7 +1,10 @@
-"""`mcgram init` — scaffold ~/.mcgram/ and install companion skill."""
+"""`mcgram init` — scaffold ~/.mcgram/, install skill, register MCP with Claude Code."""
 
 from __future__ import annotations
 
+import contextlib
+import shutil
+import subprocess
 from importlib import resources
 from pathlib import Path
 
@@ -31,19 +34,72 @@ Next steps:
        - Copy `chat.id` from the JSON
   3. Edit {env}  → paste MCGRAM_BOT_TOKEN
   4. Edit {cfg} → set operator_chat_id
-  5. Register with Claude Code:
-
-       claude mcp add --scope user mcgram \\
-         --env MCGRAM_CONFIG={cfg} \\
-         -- mcgram
-
+  5. Test:  mcgram doctor
   6. Restart Claude Code → /mcp → mcgram appears
-  7. Test:  mcgram doctor
 """
 
 
+def _claude_cli_available() -> bool:
+    return shutil.which("claude") is not None
+
+
+def _is_already_registered() -> bool:
+    """Return True if `mcgram` already in `claude mcp list`."""
+    try:
+        result = subprocess.run(
+            ["claude", "mcp", "list"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (subprocess.SubprocessError, FileNotFoundError, OSError):
+        return False
+    return any(
+        line.strip().startswith("mcgram:") or line.strip().startswith("mcgram ")
+        for line in (result.stdout or "").splitlines()
+    )
+
+
+def _register_with_claude_code(cfg: Path, *, force: bool) -> None:
+    """Run `claude mcp add` so the user doesn't have to. No-ops if claude CLI absent."""
+    if not _claude_cli_available():
+        print("skip     `claude` CLI not found — run `claude mcp add` manually later")
+        return
+
+    already = _is_already_registered()
+    if already and not force:
+        print("skipped  mcgram already in `claude mcp list` (use --force to re-register)")
+        return
+
+    if already and force:
+        with contextlib.suppress(subprocess.SubprocessError, OSError):
+            subprocess.run(
+                ["claude", "mcp", "remove", "mcgram"],
+                check=False, capture_output=True, timeout=10,
+            )
+
+    try:
+        result = subprocess.run(
+            [
+                "claude", "mcp", "add",
+                "--scope", "user", "mcgram",
+                "--env", f"MCGRAM_CONFIG={cfg}",
+                "--", "mcgram",
+            ],
+            capture_output=True, text=True, timeout=15,
+        )
+    except (subprocess.SubprocessError, OSError) as e:
+        print(f"skip     `claude mcp add` failed: {e}")
+        return
+
+    if result.returncode == 0:
+        print("registered  mcgram with Claude Code (scope: user)")
+    else:
+        print(f"skip        `claude mcp add` exited {result.returncode}")
+        if result.stderr:
+            print(f"            stderr: {result.stderr.strip()[:200]}")
+
+
 def init_config(*, force: bool = False) -> int:
-    """Scaffold ~/.mcgram/{config.yaml, .env} and install the skill. Idempotent."""
+    """Scaffold ~/.mcgram/, install skill, register MCP. Idempotent."""
     home = Path.home() / ".mcgram"
     home.mkdir(parents=True, exist_ok=True)
     cfg = home / "config.yaml"
@@ -69,8 +125,8 @@ def init_config(*, force: bool = False) -> int:
     for p in skipped:
         print(f"skipped  {p} (already exists; use --force to overwrite)")
 
-    # Visible so the user knows the Claude Code skill is wired up.
     install_skill(quiet=False, force=force)
+    _register_with_claude_code(cfg, force=force)
 
     print(_NEXT_STEPS.format(env=env, cfg=cfg))
     return 0

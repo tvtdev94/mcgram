@@ -6,7 +6,14 @@ from pathlib import Path
 
 import pytest
 
+from mcgram import cli_init
 from mcgram.cli_init import init_config
+
+
+@pytest.fixture(autouse=True)
+def _no_claude_cli(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Skip auto-register by default — only the dedicated test exercises it."""
+    monkeypatch.setattr(cli_init, "_claude_cli_available", lambda: False)
 
 
 def test_init_creates_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
@@ -45,3 +52,44 @@ def test_init_force_overwrites(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     text = (home / "config.yaml").read_text()
     assert "# CUSTOM" not in text  # overwritten
     assert "bot:" in text  # has the bundled template
+
+
+def test_register_calls_claude_mcp_add(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                        capsys: pytest.CaptureFixture[str]) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+
+    calls: list[list[str]] = []
+
+    class _Result:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_run(cmd: list[str], **kw: object) -> _Result:
+        calls.append(cmd)
+        return _Result()
+
+    monkeypatch.setattr(cli_init, "_claude_cli_available", lambda: True)
+    monkeypatch.setattr(cli_init, "_is_already_registered", lambda: False)
+    monkeypatch.setattr(cli_init.subprocess, "run", fake_run)
+
+    init_config()
+    out = capsys.readouterr().out
+    assert "registered" in out
+    add_call = next(c for c in calls if "add" in c)
+    assert "mcgram" in add_call
+    assert any("MCGRAM_CONFIG=" in arg for arg in add_call)
+
+
+def test_register_skipped_when_already_present(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setattr(cli_init, "_claude_cli_available", lambda: True)
+    monkeypatch.setattr(cli_init, "_is_already_registered", lambda: True)
+    init_config()
+    out = capsys.readouterr().out
+    assert "already in" in out
