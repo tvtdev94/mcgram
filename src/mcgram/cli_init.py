@@ -120,9 +120,34 @@ def _register_with_claude_code(cfg: Path, *, force: bool) -> None:
             print(f"            stderr: {result.stderr.strip()[:200]}")
 
 
-def _render_config_template(topic: str) -> str:
-    """Substitute placeholder topic into the bundled config template."""
-    return _bundled_config_yaml().replace("{{NTFY_TOPIC}}", topic)
+def _render_config_template(topic: str, *, tg_disable_polling: bool) -> str:
+    """Substitute placeholders into the bundled config template: the generated
+    ntfy topic and the detected Telegram reachability (`disable_polling`)."""
+    return (
+        _bundled_config_yaml()
+        .replace("{{NTFY_TOPIC}}", topic)
+        .replace("{{TG_DISABLE_POLLING}}", "true" if tg_disable_polling else "false")
+    )
+
+
+def _probe_telegram_reachable(
+    api_root: str = "https://api.telegram.org", timeout: float = 5.0
+) -> bool:
+    """Best-effort: can this machine reach the Telegram Bot API?
+
+    Any HTTP response (even 404) means the host is reachable -> True. A connect
+    or timeout error means it is blocked/unreachable -> False. Never raises.
+
+    Returns True (skips the probe) when MCGRAM_INIT_NO_TG_PROBE is set — for
+    air-gapped installs and tests, where 'reachable' keeps disable_polling=false.
+    """
+    if os.environ.get("MCGRAM_INIT_NO_TG_PROBE", "").strip().lower() in {"1", "true", "yes"}:
+        return True
+    try:
+        httpx.get(api_root, timeout=timeout)
+        return True
+    except httpx.HTTPError:
+        return False
 
 
 def _seed_ntfy_subscription(server: str, topic: str) -> None:
@@ -184,9 +209,14 @@ def init_config(*, force: bool = False) -> int:
     skipped: list[str] = []
 
     fresh_scaffold = False
+    tg_reachable = True
     if not cfg.exists() or force:
         topic = _generate_topic()
-        cfg.write_text(_render_config_template(topic), encoding="utf-8")
+        tg_reachable = _probe_telegram_reachable()
+        cfg.write_text(
+            _render_config_template(topic, tg_disable_polling=not tg_reachable),
+            encoding="utf-8",
+        )
         created.append(str(cfg))
         fresh_scaffold = True
     else:
@@ -203,6 +233,15 @@ def init_config(*, force: bool = False) -> int:
         print(f"created  {p}")
     for p in skipped:
         print(f"skipped  {p} (already exists; use --force to overwrite)")
+
+    if fresh_scaffold:
+        if tg_reachable:
+            print("detect   telegram reachable — enable `bot:` later for 2-way `ask`")
+        else:
+            print(
+                "detect   api.telegram.org unreachable — this machine looks "
+                "Telegram-blocked; ntfy stays default (bot.disable_polling pre-set true)"
+            )
 
     install_skill(quiet=False, force=force)
     _register_with_claude_code(cfg, force=force)

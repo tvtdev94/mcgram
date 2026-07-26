@@ -61,3 +61,48 @@ def test_unknown_channel_raises(tmp_path: Path) -> None:
     s = _write(tmp_path / "c.yaml", "bot:\n  operator_chat_id: 1\n")
     with pytest.raises(ConfigError, match="unknown channel"):
         s.resolve_channel("nope")
+
+
+def test_default_routes_to_ntfy_when_telegram_blocked(tmp_path: Path) -> None:
+    """bot present but polling disabled (blocked machine) + ntfy → default = ntfy."""
+    s = _write(
+        tmp_path / "c.yaml",
+        """
+bot:
+  operator_chat_id: 1
+  disable_polling: true
+ntfy:
+  default_topic: mcgram-abc
+""",
+    )
+    dest = s.resolve_destination()
+    assert dest.transport == "ntfy"
+    assert dest.ntfy_topic == "mcgram-abc"
+
+
+def test_default_routes_to_telegram_when_reachable(tmp_path: Path) -> None:
+    """bot with polling on wins the default even when ntfy is also configured."""
+    s = _write(
+        tmp_path / "c.yaml",
+        """
+bot:
+  operator_chat_id: 7
+  disable_polling: false
+ntfy:
+  default_topic: mcgram-abc
+""",
+    )
+    dest = s.resolve_destination()
+    assert dest.transport == "telegram"
+    assert dest.chat_id == 7
+
+
+def test_default_telegram_sendonly_when_blocked_without_ntfy(tmp_path: Path) -> None:
+    """No ntfy fallback: a blocked bot still seeds a (send-only) telegram default."""
+    s = _write(
+        tmp_path / "c.yaml",
+        "bot:\n  operator_chat_id: 5\n  disable_polling: true\n",
+    )
+    dest = s.resolve_destination()
+    assert dest.transport == "telegram"
+    assert dest.chat_id == 5

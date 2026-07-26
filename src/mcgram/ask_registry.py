@@ -68,7 +68,7 @@ class AskRegistry:
         )
         try:
             value, source = await asyncio.wait_for(fut, timeout=timeout_s)
-            await _strip_keyboard(client, chat_id, msg["message_id"])
+            await _mark_answered(client, chat_id, msg["message_id"], question, value, source)
             return {"value": value, "source": source, "question_id": q_id}
         except TimeoutError:
             await _mark_timed_out(client, chat_id, msg["message_id"], question)
@@ -122,6 +122,29 @@ class AskRegistry:
 
     def set_answer_hook(self, hook: Any) -> None:
         self._answer_hook = hook
+
+
+async def _mark_answered(
+    client: TelegramClient,
+    chat_id: int,
+    message_id: int,
+    question: str,
+    value: str,
+    source: str,
+) -> None:
+    """Record the operator's answer in the chat by rewriting the question message.
+
+    Without this the inline keyboard just vanishes on reply, leaving no trace in
+    chat history of what was picked. Append the choice, then drop the buttons.
+    """
+    label = "Đã chọn" if source == "button" else "Trả lời"
+    try:
+        await client.edit_message_text(
+            chat_id, message_id, f"{question}\n\n✅ {label}: {value}"
+        )
+    except Exception:
+        log.debug("edit_message_text on answer failed (non-fatal)", exc_info=True)
+    await _strip_keyboard(client, chat_id, message_id)
 
 
 async def _strip_keyboard(client: TelegramClient, chat_id: int, message_id: int) -> None:

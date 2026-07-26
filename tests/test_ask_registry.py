@@ -190,5 +190,51 @@ async def test_callback_index_out_of_range() -> None:
     assert result["value"] == "only"
 
 
+async def test_button_answer_echoed_into_message() -> None:
+    """After a button tap the question message is rewritten to record the choice."""
+    client = FakeClient()
+    reg = AskRegistry()
+    reg.set_answer_hook(client.answer_callback_query)
+
+    async def driver() -> None:
+        for _ in range(50):
+            if reg.open_count:
+                break
+            await asyncio.sleep(0.01)
+        q_id = next(iter(reg._pending))
+        await reg.handle_update({"callback_query": {"id": "cq1", "data": f"{q_id}:1"}})
+
+    drv = asyncio.create_task(driver())
+    result = await reg.open(
+        client, chat_id=1, question="Deploy?", options=["Yes", "No"], timeout_s=5
+    )
+    await drv
+    assert result["value"] == "No"
+    text_edits = [e for e in client.edited if e["kind"] == "text"]
+    assert any("Deploy?" in e["text"] and "Đã chọn: No" in e["text"] for e in text_edits)
+
+
+async def test_freetext_answer_echoed_into_message() -> None:
+    client = FakeClient()
+    reg = AskRegistry()
+
+    async def driver() -> None:
+        for _ in range(50):
+            if reg.open_count:
+                break
+            await asyncio.sleep(0.01)
+        await asyncio.sleep(0.01)
+        await reg.handle_update({
+            "message": {"chat": {"id": 1}, "text": "ship it", "date": time.time() + 1}
+        })
+
+    drv = asyncio.create_task(driver())
+    result = await reg.open(client, chat_id=1, question="Why?", options=None, timeout_s=5)
+    await drv
+    assert result["value"] == "ship it"
+    text_edits = [e for e in client.edited if e["kind"] == "text"]
+    assert any("Trả lời: ship it" in e["text"] for e in text_edits)
+
+
 # Suppress "Unused" import on bare envs
 _ = pytest

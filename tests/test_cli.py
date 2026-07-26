@@ -11,11 +11,13 @@ from mcgram.cli import main
 
 
 def test_version(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    from mcgram import __version__
+
     monkeypatch.setattr(sys, "argv", ["mcgram", "--version"])
     main()
     out = capsys.readouterr().out
     assert "mcgram" in out
-    assert "0.2.0" in out
+    assert __version__ in out
 
 
 def test_help(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:

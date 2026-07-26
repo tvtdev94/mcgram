@@ -16,6 +16,13 @@ def _no_claude_cli(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cli_init, "_claude_cli_available", lambda: False)
 
 
+@pytest.fixture(autouse=True)
+def _no_tg_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep init offline: skip the Telegram reachability probe unless a test
+    overrides `_probe_telegram_reachable` itself."""
+    monkeypatch.setenv("MCGRAM_INIT_NO_TG_PROBE", "1")
+
+
 def test_init_creates_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
                             capsys: pytest.CaptureFixture[str]) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
@@ -93,3 +100,58 @@ def test_register_skipped_when_already_present(
     init_config()
     out = capsys.readouterr().out
     assert "already in" in out
+
+
+def test_init_sets_disable_polling_false_when_telegram_reachable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setattr(cli_init, "_probe_telegram_reachable", lambda *a, **k: True)
+    init_config()
+    text = (Path.home() / ".mcgram" / "config.yaml").read_text(encoding="utf-8")
+    assert "disable_polling: false" in text
+    assert "{{TG_DISABLE_POLLING}}" not in text  # placeholder fully substituted
+
+
+def test_init_sets_disable_polling_true_when_telegram_blocked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setattr(cli_init, "_probe_telegram_reachable", lambda *a, **k: False)
+    init_config()
+    text = (Path.home() / ".mcgram" / "config.yaml").read_text(encoding="utf-8")
+    assert "disable_polling: true" in text
+    out = capsys.readouterr().out
+    assert "unreachable" in out.lower()
+
+
+def test_probe_reachable_true_on_any_response(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("MCGRAM_INIT_NO_TG_PROBE", raising=False)
+    import httpx
+    monkeypatch.setattr(httpx, "get", lambda *a, **k: object())
+    assert cli_init._probe_telegram_reachable() is True
+
+
+def test_probe_reachable_false_on_http_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("MCGRAM_INIT_NO_TG_PROBE", raising=False)
+    import httpx
+
+    def _boom(*_a: object, **_k: object) -> object:
+        raise httpx.ConnectError("blocked")
+
+    monkeypatch.setattr(httpx, "get", _boom)
+    assert cli_init._probe_telegram_reachable() is False
+
+
+def test_probe_skipped_via_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MCGRAM_INIT_NO_TG_PROBE", "1")
+    import httpx
+
+    def _boom(*_a: object, **_k: object) -> object:
+        raise AssertionError("probe must not touch the network when skipped")
+
+    monkeypatch.setattr(httpx, "get", _boom)
+    assert cli_init._probe_telegram_reachable() is True

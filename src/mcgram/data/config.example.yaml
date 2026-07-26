@@ -16,6 +16,8 @@ ntfy:
 # bot:
 #   token_env: MCGRAM_BOT_TOKEN
 #   operator_chat_id: 0             # your personal chat ID (integer)
+#   disable_polling: {{TG_DISABLE_POLLING}}   # auto-detected at init: true = api.telegram.org
+#                                   # looked unreachable (send-only, no `ask`); false = reachable
 
 defaults:
   parse_mode: plain               # plain | markdown_v2 (default plain)

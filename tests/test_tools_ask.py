@@ -64,6 +64,11 @@ async def test_happy_button(app_state: AppState, httpx_mock) -> None:
         url="https://api.telegram.org/botfake-token/answerCallbackQuery",
         json={"ok": True, "result": True},
     )
+    # ask now rewrites the question message to record the choice, then strips buttons.
+    httpx_mock.add_response(
+        url="https://api.telegram.org/botfake-token/editMessageText",
+        json={"ok": True, "result": True},
+    )
     httpx_mock.add_response(
         url="https://api.telegram.org/botfake-token/editMessageReplyMarkup",
         json={"ok": True, "result": True},

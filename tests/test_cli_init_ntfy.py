@@ -19,8 +19,10 @@ def _no_claude_cli(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture(autouse=True)
 def _no_real_network(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Don't hit ntfy.sh from the test suite; default to skipping the welcome seed."""
+    """Don't hit the network from the test suite: skip the welcome seed and the
+    Telegram reachability probe (probe-skipped counts as reachable)."""
     monkeypatch.setenv("MCGRAM_INIT_NO_WELCOME", "1")
+    monkeypatch.setenv("MCGRAM_INIT_NO_TG_PROBE", "1")
 
 
 def test_generate_topic_format() -> None:

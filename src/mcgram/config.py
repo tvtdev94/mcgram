@@ -154,24 +154,37 @@ class Settings(BaseModel):
 
     @model_validator(mode="after")
     def _seed_default_channel(self) -> Settings:
-        """Auto-seed `default` channel based on which transport is configured.
+        """Auto-seed `default` channel based on which transport can actually serve.
 
-        Priority when both transports are present and user hasn't declared
-        `channels.default` explicitly: telegram wins (preserves pre-ntfy behavior).
+        User's explicit `channels.default` always wins. Otherwise Telegram is the
+        default only when it can fully operate (polling on → `ask` works). A machine
+        that blocks Telegram sets `bot.disable_polling=true`; there, if ntfy is
+        configured, the default routes to ntfy instead — so notifications land
+        somewhere reachable rather than a transport that can't be polled.
         """
         if DEFAULT_CHANNEL in self.channels:
             return self
-        if self.bot is not None:
+        ntfy_usable = self.ntfy is not None and bool(self.ntfy.default_topic)
+        if self.bot is not None and not self.bot.disable_polling:
             self.channels[DEFAULT_CHANNEL] = ChannelConfig(
                 transport="telegram",
                 chat_id=self.bot.operator_chat_id,
                 description="Auto-created from bot.operator_chat_id",
             )
-        elif self.ntfy is not None and self.ntfy.default_topic:
+        elif ntfy_usable:
+            assert self.ntfy is not None
             self.channels[DEFAULT_CHANNEL] = ChannelConfig(
                 transport="ntfy",
                 ntfy_topic=self.ntfy.default_topic,
                 description="Auto-created from ntfy.default_topic",
+            )
+        elif self.bot is not None:
+            # bot present but polling disabled and no ntfy fallback — still seed a
+            # default so send-only Telegram deployments have a target.
+            self.channels[DEFAULT_CHANNEL] = ChannelConfig(
+                transport="telegram",
+                chat_id=self.bot.operator_chat_id,
+                description="Auto-created from bot.operator_chat_id (send-only)",
             )
         return self
 

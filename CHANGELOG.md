@@ -5,6 +5,26 @@ All notable changes to mcgram will be documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.2.2] — 2026-07-26
+
+### Added
+- `mcgram init` now probes `api.telegram.org` reachability and bakes the result
+  into the scaffolded config: `bot.disable_polling` is pre-set (`true` when the
+  machine looks Telegram-blocked, `false` when reachable). Skippable via
+  `MCGRAM_INIT_NO_TG_PROBE=1` (air-gapped installs / CI).
+
+### Changed
+- Default-channel auto-seed (`Settings._seed_default_channel`) now prefers ntfy
+  when a bot is configured but `disable_polling=true` (blocked machine) and an
+  ntfy topic exists — so notifications land on a reachable transport instead of
+  a Telegram channel that can't be polled. Explicit `channels.default` still wins.
+- `ask` now rewrites the question message to record the operator's choice
+  (`✅ Đã chọn: …` for buttons, `✅ Trả lời: …` for freetext) instead of only
+  stripping the inline keyboard — the selection stays visible in chat history.
+
+### Fixed
+- `test_version` no longer hard-codes the version string (asserts `__version__`).
+
 ## [0.2.1] — 2026-07-26
 
 ### Fixed
