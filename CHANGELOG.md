@@ -5,6 +5,12 @@ All notable changes to mcgram will be documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.2.1] — 2026-07-26
+
+### Fixed
+- README images and doc links now use absolute GitHub URLs so they render on
+  the PyPI project page (relative paths only resolve inside the GitHub repo).
+
 ## [0.2.0] — 2026-05-22
 
 ### Added

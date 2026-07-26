@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/images/logo.png" alt="mcgram logo" width="120" />
+<img src="https://raw.githubusercontent.com/tvtdev94/mcgram/main/docs/images/logo.png" alt="mcgram logo" width="120" />
 
 # mcgram
 
@@ -9,11 +9,11 @@
 [![CI](https://github.com/tvtdev94/mcgram/actions/workflows/ci.yml/badge.svg)](https://github.com/tvtdev94/mcgram/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/mcgram.svg)](https://pypi.org/project/mcgram/)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/tvtdev94/mcgram/blob/main/LICENSE)
 [![Tests](https://img.shields.io/badge/tests-153%20passing-brightgreen.svg)](#)
 [![Coverage](https://img.shields.io/badge/coverage-84%25-brightgreen.svg)](#)
 
-<img src="docs/images/hero.png" alt="mcgram hero" width="720" />
+<img src="https://raw.githubusercontent.com/tvtdev94/mcgram/main/docs/images/hero.png" alt="mcgram hero" width="720" />
 
 </div>
 
@@ -37,7 +37,7 @@ Single process, no daemon, no VPS, no webhook setup. Lives inside the MCP server
 ## How it fits together
 
 <div align="center">
-<img src="docs/images/flow.png" alt="Architecture flow" width="720" />
+<img src="https://raw.githubusercontent.com/tvtdev94/mcgram/main/docs/images/flow.png" alt="Architecture flow" width="720" />
 </div>
 
 Claude Code spawns `mcgram` over stdio. mcgram opens a long-poll to the Telegram Bot API. When you tap a button or type a reply, the update lands on your phone-out / mcgram-in side, the operator allowlist filters non-you traffic, and the answer flows back to Claude as the tool result.
@@ -107,7 +107,7 @@ Declare both `ntfy:` and `bot:` in config — each named channel picks its own t
 | **`cancel_reminder`** | — | — | Cancel a pending reminder |
 | **`list_reminders`** | — | — | List currently pending reminders |
 
-ntfy.sh has no 2-way input, so `ask` returns `transport_unsupported` on ntfy channels. The companion [Claude Code skill](src/mcgram/data/skill/SKILL.md) (installed by `mcgram init`) teaches Claude when to call which tool — both **English** and **Vietnamese** trigger phrases are recognized.
+ntfy.sh has no 2-way input, so `ask` returns `transport_unsupported` on ntfy channels. The companion [Claude Code skill](https://github.com/tvtdev94/mcgram/blob/main/src/mcgram/data/skill/SKILL.md) (installed by `mcgram init`) teaches Claude when to call which tool — both **English** and **Vietnamese** trigger phrases are recognized.
 
 ## Channels
 
@@ -196,7 +196,7 @@ allow_outside_cwd: false           # send_file restricted to CWD by default
 | ⏱ **`ask` DoS** | Hard timeout cap (600s) so a forgetful user can't freeze Claude forever |
 | 🔁 **Polling conflict** | Telegram 409 caught with clean error — no crash loop |
 
-Full STRIDE analysis: [docs/security-threat-model.md](docs/security-threat-model.md).
+Full STRIDE analysis: [docs/security-threat-model.md](https://github.com/tvtdev94/mcgram/blob/main/docs/security-threat-model.md).
 
 ## Audit
 
@@ -229,7 +229,7 @@ Sample lines:
 
 ## Architecture
 
-Full module map, lifecycle diagram, and data flow: [docs/architecture.md](docs/architecture.md).
+Full module map, lifecycle diagram, and data flow: [docs/architecture.md](https://github.com/tvtdev94/mcgram/blob/main/docs/architecture.md).
 
 ```
 src/mcgram/
@@ -268,4 +268,4 @@ uv run ruff check src/ tests/
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT — see [LICENSE](https://github.com/tvtdev94/mcgram/blob/main/LICENSE).

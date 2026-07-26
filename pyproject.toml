@@ -1,6 +1,6 @@
 [project]
 name = "mcgram"
-version = "0.2.0"
+version = "0.2.1"
 description = "Notification bridge for Claude Code (Telegram + ntfy.sh) — send notifications, ask short questions, set reminders via Telegram bot or ntfy.sh topic."
 readme = "README.md"
 requires-python = ">=3.11"
