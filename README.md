@@ -10,8 +10,8 @@
 [![PyPI](https://img.shields.io/pypi/v/mcgram.svg)](https://pypi.org/project/mcgram/)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/tvtdev94/mcgram/blob/main/LICENSE)
-[![Tests](https://img.shields.io/badge/tests-153%20passing-brightgreen.svg)](#)
-[![Coverage](https://img.shields.io/badge/coverage-84%25-brightgreen.svg)](#)
+[![Tests](https://img.shields.io/badge/tests-268%20passing-brightgreen.svg)](#)
+[![Coverage](https://img.shields.io/badge/coverage-85%25-brightgreen.svg)](#)
 
 <img src="https://raw.githubusercontent.com/tvtdev94/mcgram/main/docs/images/hero.png" alt="mcgram hero" width="720" />
 
@@ -32,7 +32,7 @@ Walk away from a long-running task. mcgram lets Claude **tap you on the shoulder
 | 🛰 **Multi-channel** | Route messages to named destinations across both transports |
 | 🌐 **No-token mode** | Use ntfy.sh on machines where `api.telegram.org` is blocked |
 
-Single process, no daemon, no VPS, no webhook setup. Lives inside the MCP server while Claude Code is open.
+No daemon, no VPS, no webhook setup. Lives inside the MCP server while Claude Code is open — and runs in every session at once, not just the first.
 
 ## How it fits together
 
@@ -102,12 +102,12 @@ Declare both `ntfy:` and `bot:` in config — each named channel picks its own t
 | **`send_message`** | ✅ | ✅ | Notify on completion / send a status update |
 | **`send_file`** | ✅ | ✅ | Send logs, screenshots, generated artifacts |
 | **`send_video`** | ✅ | ✅ | Send a video that **plays in-chat** (mp4/mov/mkv/webm/m4v) |
-| **`ask`** | ✅ | ❌ | Question with inline buttons OR freetext, blocks until reply. Telegram-only |
-| **`set_reminder`** | ✅ | ✅ | Schedule an in-process reminder (lost on restart) |
+| **`ask`** | ✅ | ❌ | Question with inline buttons OR freetext, blocks until reply. Telegram-only, and only in the polling session |
+| **`set_reminder`** | ✅ | ✅ | Schedule an in-process reminder (per-session; lost on restart) |
 | **`cancel_reminder`** | — | — | Cancel a pending reminder |
 | **`list_reminders`** | — | — | List currently pending reminders |
 
-ntfy.sh has no 2-way input, so `ask` returns `transport_unsupported` on ntfy channels. The companion [Claude Code skill](https://github.com/tvtdev94/mcgram/blob/main/src/mcgram/data/skill/SKILL.md) (installed by `mcgram init`) teaches Claude when to call which tool — both **English** and **Vietnamese** trigger phrases are recognized.
+ntfy.sh has no 2-way input, so `ask` returns `transport_unsupported` on ntfy channels — and `polling_not_owned` in a session that isn't the one polling Telegram ([why](#multiple-claude-code-sessions)). The companion [Claude Code skill](https://github.com/tvtdev94/mcgram/blob/main/src/mcgram/data/skill/SKILL.md) (installed by `mcgram init`) teaches Claude when to call which tool — both **English** and **Vietnamese** trigger phrases are recognized.
 
 ## Channels
 
@@ -190,7 +190,7 @@ allow_outside_cwd: false           # send_file restricted to CWD by default
 | 🚪 **Operator filter** | Non-`operator_chat_id` updates rejected at dispatcher entry — never reach tool handlers |
 | 🛡 **`send_file` traversal** | Path resolved + checked against CWD; size capped at `file_max_bytes` |
 | ⚡ **Rate limit** | Per-tool token bucket (default 20/min) |
-| 🔒 **Single instance** | PID-file lock at `~/.mcgram/.lock`; second `mcgram` exits with `LockHeldError` |
+| 🔒 **Single poller** | PID-file lock at `~/.mcgram/.lock` scoped to Telegram polling; extra instances run send-only instead of exiting |
 | 📜 **Audit trail** | Every call logged JSONL with `fsync`; survives `kill -9` |
 | 🛌 **Reminder spam** | Max 10 pending, 24h delay cap, 1000-char text cap |
 | ⏱ **`ask` DoS** | Hard timeout cap (600s) so a forgetful user can't freeze Claude forever |
@@ -216,16 +216,41 @@ Sample lines:
 {"ts":"2026-05-21T10:00:10+00:00","tool":"send_file","status":"rejected","reason":"file_too_large","bytes":62914560}
 ```
 
+## Multiple Claude Code sessions
+
+Run as many sessions as you like — each spawns its own `mcgram`, and all of them
+work. One caveat, and it's a Telegram rule, not a mcgram one: `getUpdates`
+accepts a single client per bot token. So exactly one instance polls (first to
+start wins) and the rest run **send-only**:
+
+| | Polling instance | Other instances |
+|---|:---:|:---:|
+| `send_message` / `send_file` / `send_video` | ✅ | ✅ |
+| `set_reminder` / `cancel_reminder` / `list_reminders` | ✅ | ✅ |
+| `ask` | ✅ | ❌ `polling_not_owned` |
+
+`ask` fails **immediately** in a send-only instance (with the polling pid, so
+you know which session to ask from) — it never blocks on a timeout it can't win.
+
+Ownership moves on its own: close the polling session and another picks it up
+within ~30s, no restart needed. Same after a crash — the stale lock is reclaimed.
+
+To bypass the lock entirely, set `MCGRAM_SKIP_LOCK=1` — both instances then
+poll and Telegram returns 409 to one of them (backed off, not crash-looped).
+Rarely what you want.
+
 ## Known limitations
 
-- **No persistent reminders** — schedules live in process memory. Restart = lost.
+- **Reminders are per-session** — each instance keeps its own in-memory
+  schedule. `list_reminders` in one session won't show reminders set in
+  another, and closing that session drops them. Restart = lost.
 - **`ask` blocks the MCP call** — keep timeouts short or Claude waits idle.
 - **`ask` is Telegram-only** — ntfy.sh has no 2-way input. On ntfy channels, `ask` returns `transport_unsupported` without contacting the network.
 - **ntfy.sh public topics are URL-discoverable** — anyone with the topic name can subscribe. mcgram generates 64-bit-entropy topics, but **don't send secrets / PII** unless you self-host ntfy with auth.
 - **ntfy.sh file size cap** — public free tier ~15 MB (vs Telegram's 50 MB). Self-hosted ntfy can raise the cap.
 - **No remote control** — Claude can send, but the bot doesn't accept arbitrary commands FROM Telegram. (Future v0.2.)
 - **No webhook / VPS support** — Telegram uses long-poll only.
-- **Same Telegram token on 2 machines** → 409 Conflict (only one poller per bot). mcgram backs off cleanly; use different bots for different machines. (When `bot:` is omitted, Telegram polling is fully disabled — no 409, no log spam.)
+- **Same Telegram token on 2 machines** → 409 Conflict (only one poller per bot). The `~/.mcgram/.lock` coordination is per-machine, so two hosts can't see each other's lock; mcgram backs off cleanly, but use different bots for different machines. (Several sessions on ONE machine are fine — see [Multiple Claude Code sessions](#multiple-claude-code-sessions).)
 
 ## Architecture
 
@@ -236,11 +261,11 @@ src/mcgram/
 ├── cli.py · cli_init · cli_doctor · cli_audit · cli_channel · skill_installer
 ├── config · errors · audit · lock · rate_limiter
 ├── tg_client · ntfy_client · dispatch · update_dispatcher · polling · server · runtime
-├── ask_registry · reminders
+├── poll_ownership · ask_registry · reminders
 └── tools/  send_message · send_file · send_video · ask · set_reminder · cancel_reminder · list_reminders
 ```
 
-All modules <200 LOC, 153 tests, ruff clean, py3.11/3.12 × ubuntu/windows in CI.
+All modules <200 LOC, 268 tests, ruff clean, py3.11/3.12 × ubuntu/windows in CI.
 
 ## Update / uninstall
 

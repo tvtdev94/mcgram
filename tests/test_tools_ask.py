@@ -25,10 +25,14 @@ async def test_too_many_options(app_state: AppState) -> None:
     assert out["reason"] == "too_many_options"
 
 
-async def test_registry_not_initialized(app_state: AppState) -> None:
+async def test_no_registry_reports_polling_not_owned(app_state: AppState) -> None:
+    """No registry means another instance owns the poll loop — say so."""
+    app_state.poll_owner_pid = 4242
     out = await ask.handle(app_state, question="?")
-    assert out["error"] == "internal"
-    assert out["reason"] == "ask_registry_not_initialized"
+    assert out["error"] == "polling_not_owned"
+    assert out["poll_owner_pid"] == 4242
+    # The pid belongs in the hint too: it tells the user WHICH session to ask in.
+    assert "4242" in out["hint"]
 
 
 async def test_options_invalid_type(app_state: AppState) -> None:

@@ -19,8 +19,8 @@ from . import __version__
 from .audit import AuditLog
 from .config import Settings
 from .errors import ConfigError, MCGramError
-from .lock import SingleInstanceLock
 from .ntfy_client import NtfyClient
+from .poll_ownership import PollOwnership, cancel_task
 from .polling import poll_loop
 from .rate_limiter import RateLimiter
 from .runtime import AppState
@@ -49,11 +49,11 @@ def _phase2_tool_modules() -> list:
 async def _serve(state: AppState) -> None:
     server: Server = Server(SERVER_NAME)
     modules = _phase2_tool_modules()
-    if state.ask_registry is not None:
-        from .tools import ask, cancel_reminder, list_reminders, set_reminder
-        modules += [ask, set_reminder, cancel_reminder, list_reminders]
-    elif state.reminders is not None:
-        # Reminders may still work over ntfy even without ask_registry
+    if state.reminders is not None:
+        # The tool list is fixed for the life of the process — MCP clients cache
+        # it. `ask` is listed even when this instance doesn't own the Telegram
+        # poll loop (it then returns a structured error) because ownership can
+        # transfer at runtime, and a shrinking tool list would confuse clients.
         from .tools import ask, cancel_reminder, list_reminders, set_reminder
         modules += [ask, set_reminder, cancel_reminder, list_reminders]
     schemas = [Tool(**m.schema()) for m in modules]
@@ -109,51 +109,61 @@ async def _run() -> None:
     )
     rate = RateLimiter(settings.defaults.rate_limit_per_min)
     dispatcher = UpdateDispatcher()
-    skip_lock = _env_bool("MCGRAM_SKIP_LOCK")
-    lock_ctx = (
-        contextlib.nullcontext()
-        if skip_lock
-        else SingleInstanceLock(settings.lock_path)
+    async with _build_clients(settings) as (tg_client, ntfy_client):
+        state = AppState(
+            settings=settings,
+            dispatcher=dispatcher,
+            rate=rate,
+            audit=audit,
+            client=tg_client,
+            ntfy_client=ntfy_client,
+        )
+        _wire_phase3(state)
+        ownership, poll_task = _start_polling(state, settings)
+        try:
+            await _serve(state)
+        finally:
+            await cancel_task(poll_task)
+            if ownership is not None:
+                ownership.release()
+            _shutdown_phase3(state)
+
+
+def _start_polling(
+    state: AppState, settings: Settings
+) -> tuple[PollOwnership | None, asyncio.Task | None]:
+    """Start the poll supervisor if this machine polls Telegram at all.
+
+    Returns (ownership, task). Both are None when polling is off by
+    configuration — no `bot` section, or `bot.disable_polling`. In that case
+    `ask` is unavailable for a config reason, not a contention one, and no lock
+    is taken: an ntfy-only instance must never block a Telegram instance from
+    polling.
+    """
+    if state.client is None:
+        log.info("no `bot` section in config — Telegram polling disabled (ntfy-only mode).")
+        return None, None
+    assert settings.bot is not None
+    if settings.bot.disable_polling:
+        log.info(
+            "bot.disable_polling = true — Telegram polling skipped "
+            "(send-only on this machine)."
+        )
+        return None, None
+
+    ownership = PollOwnership(settings.lock_path, skip_lock=_env_bool("MCGRAM_SKIP_LOCK"))
+    # Acquire before serving so the first `ask` sees a settled ownership state
+    # rather than racing the supervisor's first loop iteration.
+    ownership.attach(state)
+    client, operator_chat_id = state.client, settings.bot.operator_chat_id
+    task = asyncio.create_task(
+        ownership.supervise(
+            state,
+            lambda: poll_loop(client, state.dispatcher, operator_chat_id, state.audit),
+        ),
+        name="mcgram-poll-supervisor",
     )
-    with lock_ctx:
-        async with _build_clients(settings) as (tg_client, ntfy_client):
-            state = AppState(
-                settings=settings,
-                dispatcher=dispatcher,
-                rate=rate,
-                audit=audit,
-                client=tg_client,
-                ntfy_client=ntfy_client,
-            )
-            _wire_phase3(state)
-            poll_task: asyncio.Task | None = None
-            if tg_client is not None and not settings.bot.disable_polling:  # type: ignore[union-attr]
-                poll_task = asyncio.create_task(
-                    poll_loop(
-                        tg_client, dispatcher,
-                        settings.bot.operator_chat_id,  # type: ignore[union-attr]
-                        audit,
-                    ),
-                    name="mcgram-poll",
-                )
-            elif tg_client is None:
-                log.info(
-                    "no `bot` section in config — Telegram polling disabled "
-                    "(ntfy-only mode)."
-                )
-            else:
-                log.info(
-                    "bot.disable_polling = true — Telegram polling skipped "
-                    "(send-only on this machine)."
-                )
-            try:
-                await _serve(state)
-            finally:
-                if poll_task is not None:
-                    poll_task.cancel()
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await poll_task
-                _shutdown_phase3(state)
+    return ownership, task
 
 
 @contextlib.asynccontextmanager
@@ -192,17 +202,17 @@ async def _build_clients(settings: Settings):
 
 
 def _wire_phase3(state: AppState) -> None:
-    """Attach ask registry (Telegram-only) and reminder scheduler."""
+    """Attach the reminder scheduler.
+
+    The ask registry is deliberately NOT wired here: `ask` only works in the
+    process that owns the Telegram poll loop, so `PollOwnership` attaches and
+    detaches it as ownership changes. Reminders fire over one-way HTTP and are
+    safe in every instance.
+    """
     try:
-        from .ask_registry import AskRegistry
         from .reminders import ReminderScheduler
     except ImportError:
         return
-    if state.client is not None:
-        registry = AskRegistry()
-        registry.set_answer_hook(state.client.answer_callback_query)
-        state.ask_registry = registry
-        state.dispatcher.register(state.ask_registry.handle_update)
     state.reminders = ReminderScheduler(
         state.client, state.settings, state.audit, ntfy_client=state.ntfy_client,
     )
@@ -224,17 +234,13 @@ def _env_bool(name: str) -> bool:
 
 
 def main() -> None:
-    from .errors import AuthError, ConfigError, LockHeldError
+    # NOTE: LockHeldError is deliberately NOT handled here. A held lock means
+    # another instance owns Telegram polling — that is a normal state (one
+    # mcgram per Claude Code session), handled inside `PollOwnership` by
+    # degrading to send-only. Exiting on it was the -32000 startup bug.
+    from .errors import AuthError, ConfigError
     try:
         asyncio.run(_run())
-    except LockHeldError as e:
-        sys.stderr.write(
-            f"mcgram: another instance is running (pid={e.pid}).\n"
-            f"  lock file: {e.path}\n"
-            f"  If you're sure no other mcgram is running, delete the lock file.\n"
-            f"  Or set MCGRAM_SKIP_LOCK=1 to bypass (advanced; risks 409 Conflict from Telegram).\n"
-        )
-        sys.exit(1)
     except ConfigError as e:
         sys.stderr.write(f"mcgram: config error: {e}\n")
         sys.exit(1)

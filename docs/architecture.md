@@ -1,6 +1,10 @@
 # Architecture
 
-> One process, one bot, one operator chat. Long-poll on the side, MCP stdio in front.
+> One poller, one bot, one operator chat. Long-poll on the side, MCP stdio in front.
+>
+> Several mcgram processes may run at once (one per Claude Code session). They
+> all serve MCP and all send; exactly one owns the Telegram long-poll. See
+> [Poll ownership](#poll-ownership).
 
 ## Module map
 
@@ -14,6 +18,7 @@ src/mcgram/
 │
 ├── config.py               # pydantic Settings (YAML + .env)
 ├── lock.py                 # SingleInstanceLock (PID file, Windows + POSIX)
+├── poll_ownership.py       # scopes the lock to polling; degraded mode + takeover
 ├── errors.py               # exception hierarchy
 ├── audit.py                # JSONL writer + rotation + retention + redact
 │
@@ -54,9 +59,9 @@ sequenceDiagram
     participant USR as Operator (Telegram)
 
     CC->>CLI: spawn `mcgram` over stdio
-    CLI->>SRV: load config, acquire lock, open httpx client
-    SRV->>POLL: create_task(poll_loop)
-    SRV-->>CC: MCP `initialize` reply
+    CLI->>SRV: load config, open httpx client
+    SRV->>POLL: create_task(poll supervisor) — polls only if it wins the lock
+    SRV-->>CC: MCP `initialize` reply (never blocked by the lock)
     POLL->>TG: getUpdates(timeout=25)  (long-poll)
 
     CC->>SRV: tools/call send_message
@@ -107,6 +112,27 @@ This is the only line of defence against someone messaging the bot directly — 
 ## Polling resilience
 
 Exponential backoff on errors: `1s → 2s → 4s → … → 30s`. Reset to `1s` on the first successful response. Errors are logged to audit as `{tool:"_polling", status:"error", error:str}`. The loop runs until `task.cancel()` (server shutdown).
+
+HTTP 409 gets its own path: it means another client is polling this bot token, so the loop sleeps a flat 10s rather than escalating, and audits `{status:"conflict", reason:"409_another_poller"}`. Under normal operation the poll lock prevents 409 between local instances; it still appears with `MCGRAM_SKIP_LOCK=1` or the same token on a second machine.
+
+## Poll ownership
+
+Telegram's `getUpdates` accepts one client per bot token. Everything else mcgram does — sends, reminders, all of ntfy — is one-way HTTP and is safe from any number of processes at once.
+
+So `~/.mcgram/.lock` guards **the poll loop**, not the process. Before v0.3.0 it wrapped the whole server, and a second Claude Code session died at the MCP handshake with `-32000`.
+
+`poll_ownership.PollOwnership` owns this:
+
+- **Acquire on start.** Won → full mode. Lost → send-only degraded mode; the server still boots and serves.
+- **`ask` is gated on ownership.** The `AskRegistry` is attached to `AppState` only while this process polls. A non-owner returns `polling_not_owned` (with the owning pid) *immediately*, because the operator's reply is delivered to the polling process — waiting could only end in a `timeout` result that misreports an unanswerable question as an ignored one.
+- **Takeover.** A degraded instance re-checks every 30s (`MCGRAM_POLL_RETRY_S`), so it picks up polling when the owner exits — including `kill -9`, where the stale lock is reclaimed by PID liveness check.
+- **No lock when there's nothing to poll.** ntfy-only or `bot.disable_polling: true` instances skip the lock entirely; taking it would starve a real Telegram instance.
+
+Degraded mode is *not* implemented by flipping `bot.disable_polling` at runtime — that field also decides whether `channels.default` resolves to telegram or ntfy, so mutating it would silently reroute every send.
+
+## Concurrent audit writers
+
+Several processes share one `audit.jsonl`. Appends use explicit `O_APPEND` so the kernel resolves the offset at write time and lines can't clobber each other. Rotation and retention pruning rewrite files, so they take a short cross-process lock (`audit.jsonl.rotate.lock`); a loser skips the attempt rather than racing the `.jsonl → .1 → .2 → .3` renames, and a lock left by a killed process is reclaimed after 60s.
 
 ## Reminder scheduler
 

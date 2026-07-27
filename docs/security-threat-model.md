@@ -24,7 +24,8 @@ mcgram is a **personal** tool: one user, one bot, one chat, running on a develop
 |---|---|
 | Random Telegram user DMs the bot to fake an "operator reply" | `update_dispatcher.from_operator` rejects any update whose `chat.id != operator_chat_id`. Rejected updates audited as `{tool:"_polling", status:"rejected", reason:"non_operator"}`. |
 | Prompt injection in Claude's context tells it to send credentials | Cannot defend in the bridge — Claude's prompt-handling owns this. Audit log + `redact_text` option let the user notice after the fact. |
-| Second `mcgram` process picks up the same bot token (would steal updates) | `SingleInstanceLock` (PID file). Also: Telegram returns HTTP 409 if two clients call `getUpdates` for the same bot — `tg_client` surfaces it as `TelegramError`. |
+| Second `mcgram` process picks up the same bot token (would steal updates) | `SingleInstanceLock` (PID file) elects a single poller per machine; losers run send-only and never call `getUpdates`. Also: Telegram returns HTTP 409 if two clients poll the same bot — `tg_client` surfaces it as `TelegramError`, and the loop backs off 10s. |
+| Degraded instance answers an `ask` it can't actually receive (operator's reply is delivered elsewhere) | `ask` requires poll ownership and returns `polling_not_owned` immediately. The `AskRegistry` exists only in the polling process, so no non-owner can hold a pending question. |
 
 ### T — Tampering
 
@@ -59,7 +60,8 @@ mcgram is a **personal** tool: one user, one bot, one chat, running on a develop
 | Prompt injection uses `ask(timeout_s=86400)` to freeze Claude forever | `limits.ask_timeout_max_s` (default 600s) hard-caps the wait. |
 | Prompt injection uploads a 10 GB file | `limits.file_max_bytes` (default 50 MB — Telegram's hard limit anyway). |
 | Telegram API returns persistent 5xx | Polling backs off exponentially (1s → 30s). Send tools fail-fast with `telegram_api` error and audit. |
-| User accidentally runs two `mcgram` processes against the same bot | `SingleInstanceLock` rejects the second; if the lock is bypassed somehow, Telegram returns 409 on `getUpdates`. |
+| User runs several `mcgram` processes against the same bot (normal: one per Claude Code session) | The lock elects one poller; the rest run send-only and never poll. If bypassed via `MCGRAM_SKIP_LOCK=1`, Telegram returns 409 on `getUpdates` and the loop sleeps 10s per conflict instead of hot-looping. |
+| Two processes rotate `audit.jsonl` at once and lose a backup | Rotation and pruning take a cross-process lock (`audit.jsonl.rotate.lock`); a loser skips rather than racing the renames. Appends use `O_APPEND` so concurrent writes can't clobber each other. Stale lock reclaimed after 60s. |
 
 ### E — Elevation of privilege
 

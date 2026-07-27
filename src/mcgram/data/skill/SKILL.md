@@ -33,12 +33,23 @@ The user may configure **Telegram**, **ntfy.sh**, or **both**. Each channel decl
 |---|---|---|
 | `send_message`, `send_file`, `send_video` | ✅ | ✅ |
 | `set_reminder`, `cancel_reminder`, `list_reminders` | ✅ | ✅ |
-| `ask` | ✅ | ❌ returns `transport_unsupported` |
+| `ask` | ✅ (polling session only) | ❌ returns `transport_unsupported` |
 
 If `ask` returns `error: "transport_unsupported"`, **do not retry**. Tell the user:
 "This channel uses ntfy.sh which doesn't support 2-way input. I'll send a notification instead and proceed with a safe default — or switch to a telegram channel if you want me to wait for your reply."
 
 Each tool response includes a `transport` field (`"telegram"` or `"ntfy"`) so you know what got used.
+
+## `ask` needs the polling session
+
+Telegram allows one poller per bot token, so when the user has several Claude Code sessions open, only one of them receives replies. Every session can still send.
+
+If `ask` returns `error: "polling_not_owned"`, **do not retry** — it will keep failing in this session. The response carries `poll_owner_pid`, the session that *can* ask. Tell the user:
+"Another Claude Code session owns the Telegram connection (pid N), so I can't wait for a reply here. I can notify you with `send_message` and proceed with a safe default, or you can ask me from that session."
+
+Two related errors mean something different — both are config, not contention, so retrying elsewhere won't help either:
+- `polling_disabled` → `bot.disable_polling: true` on this machine.
+- `telegram_not_configured` → no `bot:` section at all (ntfy-only setup).
 
 ## Channels (routing to different chats/groups)
 
@@ -83,6 +94,8 @@ mcgram channel remove oncall
 
 - `rate_limit_exceeded` → wait 60s, retry.
 - `transport_unsupported` (from `ask` on a ntfy channel) → do **NOT** retry. Send a notification with `send_message` and proceed with a safe default, OR ask the user to switch to a telegram channel.
+- `polling_not_owned` (from `ask`) → another Claude Code session owns the Telegram connection. Do **NOT** retry here. `send_message` / `set_reminder` still work in this session — use them and proceed with a safe default, or point the user at the session in `poll_owner_pid`.
+- `polling_disabled` / `telegram_not_configured` (from `ask`) → this machine can't do 2-way Telegram at all. Same handling as above, but it's a config choice, not contention.
 - `transport_unavailable` → the channel's transport client isn't initialized (e.g. ntfy channel but no `ntfy` section in config). Tell the user to fix config.
 - `path_outside_cwd` → only files inside CWD are sendable. Ask the user to enable `allow_outside_cwd`, or move the file.
 - `file_too_large` → file exceeds the size cap. Compress, split, or summarize.

@@ -10,18 +10,21 @@ from mcgram import server as server_module
 from mcgram.errors import AuthError, ConfigError, LockHeldError
 
 
-def test_lock_held_clean_exit(monkeypatch: pytest.MonkeyPatch,
-                              capsys: pytest.CaptureFixture[str]) -> None:
+def test_lock_held_does_not_exit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A held poll lock must never reach `main()` as a fatal error.
+
+    This is the -32000 bug: `main()` used to catch LockHeldError and exit(1),
+    killing the MCP handshake for every Claude Code session after the first.
+    Contention is now handled inside PollOwnership by degrading to send-only,
+    so a LockHeldError escaping to here would be a real regression — let it
+    surface loudly rather than turning it back into a silent exit.
+    """
     async def boom() -> None:
         raise LockHeldError(12345, "/tmp/.lock")
 
     monkeypatch.setattr(server_module, "_run", boom)
-    with pytest.raises(SystemExit) as exc:
+    with pytest.raises(LockHeldError):
         server_module.main()
-    assert exc.value.code == 1
-    err = capsys.readouterr().err
-    assert "another instance is running" in err
-    assert "12345" in err
 
 
 def test_config_error_clean_exit(monkeypatch: pytest.MonkeyPatch,

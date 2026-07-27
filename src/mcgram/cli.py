@@ -19,7 +19,7 @@ USAGE:
   mcgram channel add-ntfy NAME    add a ntfy.sh channel (auto-generates topic)
   mcgram channel remove NAME      remove a channel
   mcgram install-skill [--force]  install / reinstall ~/.claude/skills/mcgram/SKILL.md
-  mcgram clear-lock               remove stale ~/.mcgram/.lock (use if MCP fails to start)
+  mcgram clear-lock               remove stale ~/.mcgram/.lock (frees Telegram polling)
   mcgram --version                print version
   mcgram --help                   print this help
 """
@@ -53,11 +53,15 @@ def main() -> None:
             force = "--force" in args[1:]
             sys.exit(install_skill(force=force))
         if first == "clear-lock":
+            # The lock now only gates Telegram polling, not startup — a stale
+            # lock costs `ask`, never the whole server. Running instances
+            # re-check periodically, so they pick polling up on their own.
             from pathlib import Path
             lock = Path("~/.mcgram/.lock").expanduser()
             if lock.exists():
                 lock.unlink()
                 print(f"removed  {lock}")
+                print("a running mcgram will take over Telegram polling within ~30s")
             else:
                 print(f"no lock file at {lock} (already clean)")
             sys.exit(0)

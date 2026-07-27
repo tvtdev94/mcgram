@@ -5,6 +5,77 @@ All notable changes to mcgram will be documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] — 2026-07-27
+
+### Fixed
+- **Only one Claude Code session could use mcgram at a time.** The second and
+  every later session failed to start with `Failed to reconnect to mcgram:
+  -32000`. `SingleInstanceLock` wrapped the whole server, so a second process
+  hit `LockHeldError` and `sys.exit(1)` before the MCP handshake completed.
+  Running several sessions at once is the normal way to use Claude Code, so
+  this made mcgram unusable for most real workflows.
+
+  Only Telegram long-polling actually needs to be exclusive (`getUpdates`
+  allows one client per bot token; a second gets HTTP 409). Everything else —
+  `send_message`, `send_file`, `send_video`, reminders, all of ntfy — is
+  one-way HTTP and is safe from any number of processes. The lock now guards
+  the poll loop instead of the process.
+
+### Changed
+- **Send-only degraded mode.** Instances that don't own the poll loop start
+  normally and keep every tool except `ask`. Previously a second session lost
+  even ntfy sends, which have nothing to do with Telegram polling.
+- **`ask` fails fast when this instance doesn't poll.** It returns immediately
+  with `polling_not_owned` and the owning pid, instead of posting the question
+  and blocking for the full `ask_timeout_s` — the operator's tap is delivered
+  to the *polling* process, so a non-owner could only ever return
+  `source: "timeout"`, misreporting an unanswerable question as an ignored one.
+  Two adjacent cases get their own reasons rather than being lumped in:
+  `telegram_not_configured` (no `bot:` section) and `polling_disabled`
+  (`bot.disable_polling`). ntfy channels still return `transport_unsupported`,
+  which means something different — that transport has no 2-way input at all.
+- **Poll ownership transfers at runtime.** A degraded instance re-checks the
+  lock every 30s, so when the owning session exits — cleanly or by `kill -9`,
+  which leaves a stale lock — `ask` starts working there without a restart.
+  Cadence override: `MCGRAM_POLL_RETRY_S` (seconds).
+- `ask` stays in the advertised tool list even where it's degraded: ownership
+  can change while the server runs, and MCP clients cache the tool list.
+- `mcgram clear-lock` now reports that a running instance will pick up polling
+  on its own; the lock no longer gates startup, so a stale one costs `ask`
+  rather than the whole server.
+- Instances that never poll — ntfy-only, or `bot.disable_polling: true` — no
+  longer take the lock at all. Holding it would starve a real Telegram
+  instance of `ask` for nothing.
+
+### Security
+- Audit log rotation is now safe with several processes writing one file.
+  Appends use explicit `O_APPEND`, and rotation/pruning take a short
+  cross-process lock (`audit.jsonl.rotate.lock`, auto-reclaimed after 60s if a
+  process is killed mid-rotation). Two processes racing the
+  `.jsonl → .1 → .2 → .3` renames used to silently drop a backup — a gap the
+  single-instance lock had been hiding.
+- `MCGRAM_SKIP_LOCK=1` keeps its exact meaning: bypass the lock and accept the
+  409 risk of two pollers. The 409 path backs off 10s per conflict.
+
+### Known limitations
+- **Reminders are per-process.** `ReminderScheduler` keeps state in memory, so
+  each session has its own set: `list_reminders` in session A does not show a
+  reminder set in session B, and closing a session drops its reminders. This
+  was already true for a single instance ("lost on restart"); with several
+  sessions it's more visible.
+- The 0.2.0 **PID-recycling collision on Windows** no longer breaks startup.
+  A recycled PID now only makes that instance think another one is polling, so
+  it runs send-only and loses `ask` — not the `-32000` startup failure. It also
+  self-heals: the lock is re-checked every 30s and reclaimed once the recycled
+  PID exits. `mcgram clear-lock` still fixes it immediately. Storing process
+  creation time alongside the PID remains the proper fix and is still deferred.
+
+### Migration notes
+- No config changes. `config.yaml` schema is untouched.
+- A second session no longer errors at startup. If you had worked around this
+  by setting `MCGRAM_SKIP_LOCK=1`, unset it — the bypass lets both instances
+  poll and produces 409 churn. The default now handles multiple sessions.
+
 ## [0.2.2] — 2026-07-26
 
 ### Added

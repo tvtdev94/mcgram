@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -113,3 +114,71 @@ def test_fsync_path(tmp_path: Path, monkeypatch) -> None:
     p = tmp_path / "audit.jsonl"
     AuditLog(p).write({"tool": "t", "status": "ok"})
     assert called  # at least one fsync
+
+
+# --- concurrent writers ------------------------------------------------------
+# Several mcgram processes share one audit file (one per Claude Code session).
+
+
+def test_concurrent_writers_do_not_lose_lines(tmp_path: Path) -> None:
+    """Two AuditLog instances on one path must both append, never overwrite."""
+    p = tmp_path / "audit.jsonl"
+    a, b = AuditLog(p), AuditLog(p)
+    for i in range(25):
+        a.write({"tool": "a", "status": "ok", "n": i})
+        b.write({"tool": "b", "status": "ok", "n": i})
+    records = _read_jsonl(p)  # parses → no torn/interleaved lines
+    assert len(records) == 50
+    assert sum(r["tool"] == "a" for r in records) == 25
+    assert sum(r["tool"] == "b" for r in records) == 25
+
+
+def test_rotation_lock_prevents_concurrent_rotate(tmp_path: Path) -> None:
+    """A second rotater backs off instead of racing the rename chain.
+
+    Without the lock, both processes shuffle `.jsonl -> .1 -> .2 -> .3` at once
+    and a backup is lost.
+    """
+    from mcgram.audit import _CrossProcessLock
+
+    p = tmp_path / "audit.jsonl"
+    a = AuditLog(p, rotate_mb=1)
+    a.write({"tool": "t", "status": "ok", "pad": "x" * 2_000_000})
+
+    rotated: list[bool] = []
+    b = AuditLog(p, rotate_mb=1)
+    b._rotate_backups = lambda: rotated.append(True)  # type: ignore[method-assign]
+
+    # Hold the lock as if another process were mid-rotation.
+    with _CrossProcessLock(f"{p}.rotate.lock") as acquired:
+        assert acquired
+        b._maybe_rotate()
+    assert rotated == []  # skipped, not raced
+
+    # Lock free again → rotation proceeds.
+    b._maybe_rotate()
+    assert rotated == [True]
+
+
+def test_stale_rotate_lock_is_reclaimed(tmp_path: Path) -> None:
+    """A lock left by a killed process must not disable rotation forever."""
+    from mcgram.audit import _ROTATE_LOCK_STALE_S, _CrossProcessLock
+
+    lock_path = tmp_path / "audit.jsonl.rotate.lock"
+    lock_path.write_text("", encoding="utf-8")
+    stale = time.time() - (_ROTATE_LOCK_STALE_S + 10)
+    os.utime(lock_path, (stale, stale))
+
+    with _CrossProcessLock(str(lock_path)) as acquired:
+        assert acquired is True
+    assert not lock_path.exists()  # released on exit
+
+
+def test_fresh_rotate_lock_is_respected(tmp_path: Path) -> None:
+    lock_path = tmp_path / "audit.jsonl.rotate.lock"
+    from mcgram.audit import _CrossProcessLock
+
+    with _CrossProcessLock(str(lock_path)) as first:
+        assert first is True
+        with _CrossProcessLock(str(lock_path)) as second:
+            assert second is False
