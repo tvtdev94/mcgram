@@ -246,6 +246,11 @@ def init_config(*, force: bool = False) -> int:
     install_skill(quiet=False, force=force)
     _register_with_claude_code(cfg, force=force)
 
+    # Optional Discord setup — interactive only; a no-op when stdin is not a TTY
+    # (tests, CI, pipes), so non-interactive init keeps working unchanged.
+    from .cli_channel import interactive_add_discord
+    interactive_add_discord(cfg)
+
     if fresh_scaffold and topic.startswith("mcgram-"):
         _seed_ntfy_subscription("https://ntfy.sh", topic)
 

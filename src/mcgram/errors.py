@@ -56,3 +56,18 @@ class NtfyError(MCGramError):
         super().__init__(f"ntfy_api: {status} {description}")
         self.status = status
         self.description = description
+
+
+class DiscordError(MCGramError):
+    """Discord webhook API returned a non-2xx response.
+
+    Carries the numeric Discord error `code` (e.g. 10015 Unknown Webhook) when
+    present — it is finer-grained than the HTTP status and drives the
+    human-readable reason mapping in `DiscordClient`.
+    """
+
+    def __init__(self, status: int, description: str, code: int | None = None) -> None:
+        super().__init__(f"discord_api: {status} {description}")
+        self.status = status
+        self.description = description
+        self.code = code

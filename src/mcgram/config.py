@@ -16,7 +16,7 @@ DEFAULT_CONFIG_PATH = "~/.mcgram/config.yaml"
 DEFAULT_HOME = "~/.mcgram"
 
 ParseMode = Literal["plain", "markdown_v2"]
-Transport = Literal["telegram", "ntfy"]
+Transport = Literal["telegram", "ntfy", "discord"]
 
 
 class BotConfig(BaseModel):
@@ -50,22 +50,47 @@ class NtfyConfig(BaseModel):
         return v.rstrip("/")
 
 
+class DiscordConfig(BaseModel):
+    """Global settings shared by every Discord channel.
+
+    Holds only the display identity — the webhook URLs (address + secret) live
+    per-channel in env vars, never here.
+    """
+
+    username: str = "mcgram"
+    avatar_url: str | None = None
+
+    @field_validator("avatar_url")
+    @classmethod
+    def _check_avatar(cls, v: str | None) -> str | None:
+        if v is not None and not v.startswith(("http://", "https://")):
+            raise ValueError("discord.avatar_url must start with http:// or https://")
+        return v
+
+
 class ChannelConfig(BaseModel):
     """A named destination the bot can reach.
 
     Telegram channels need `chat_id`. ntfy channels need `ntfy_topic`
-    (or fall back to `ntfy.default_topic` at resolve time).
+    (or fall back to `ntfy.default_topic` at resolve time). Discord channels
+    need `discord_webhook_env` — the name of an env var holding the webhook URL.
     """
 
     transport: Transport = "telegram"
     chat_id: int | None = None
     ntfy_topic: str | None = None
+    discord_webhook_env: str | None = None
     description: str | None = None
 
     @model_validator(mode="after")
     def _validate_per_transport(self) -> ChannelConfig:
         if self.transport == "telegram" and self.chat_id is None:
             raise ValueError("telegram channel requires chat_id")
+        if self.transport == "discord" and not self.discord_webhook_env:
+            raise ValueError(
+                "discord channel requires discord_webhook_env "
+                "(env var name holding the webhook URL, set in ~/.mcgram/.env)"
+            )
         return self
 
 
@@ -84,6 +109,9 @@ class LimitsConfig(BaseModel):
     # Effective cap for ntfy.sh transport (public free tier ~15 MB; self-hosters
     # can raise this in their config). Resolved as min(file_max_bytes, ntfy_file_max_bytes).
     ntfy_file_max_bytes: int = Field(15_728_640, ge=1)
+    # Effective cap for Discord webhooks (default upload limit is 25 MB).
+    # Resolved as min(file_max_bytes, discord_file_max_bytes).
+    discord_file_max_bytes: int = Field(26_214_400, ge=1)
     ask_options_max: int = Field(6, ge=1, le=20)
     caption_max_chars: int = Field(1024, ge=1, le=1024)
     reminder_text_max_chars: int = Field(1000, ge=1)
@@ -116,8 +144,13 @@ DEFAULT_CHANNEL = "default"
 class Destination:
     """Resolved channel target — what tools actually need to dispatch.
 
-    Exactly one of (chat_id) or (ntfy_topic + ntfy_server) is meaningful,
-    depending on `transport`.
+    Exactly one transport's fields are meaningful, depending on `transport`:
+    telegram → chat_id; ntfy → ntfy_topic + ntfy_server; discord →
+    discord_webhook_url (+ display identity).
+
+    Note: `thread_id` is deliberately absent — it is a per-call runtime argument,
+    not part of the config-derived destination. It travels through `dispatch.*`
+    kwargs instead.
     """
 
     name: str
@@ -126,11 +159,15 @@ class Destination:
     ntfy_topic: str | None = None
     ntfy_server: str | None = None
     ntfy_access_token: str | None = None
+    discord_webhook_url: str | None = None
+    discord_username: str | None = None
+    discord_avatar_url: str | None = None
 
 
 class Settings(BaseModel):
     bot: BotConfig | None = None
     ntfy: NtfyConfig | None = None
+    discord: DiscordConfig | None = None
     defaults: DefaultsConfig = Field(default_factory=DefaultsConfig)
     limits: LimitsConfig = Field(default_factory=LimitsConfig)
     audit: AuditConfig = Field(default_factory=AuditConfig)
@@ -146,9 +183,13 @@ class Settings(BaseModel):
 
     @model_validator(mode="after")
     def _require_at_least_one_transport(self) -> Settings:
-        if self.bot is None and self.ntfy is None:
+        has_discord_channel = any(
+            c.transport == "discord" for c in self.channels.values()
+        )
+        if self.bot is None and self.ntfy is None and not has_discord_channel:
             raise ValueError(
-                "config must define either `bot` (Telegram) or `ntfy` (ntfy.sh) section"
+                "config must define a `bot` (Telegram), `ntfy` (ntfy.sh), "
+                "or at least one Discord channel"
             )
         return self
 
@@ -161,6 +202,11 @@ class Settings(BaseModel):
         that blocks Telegram sets `bot.disable_polling=true`; there, if ntfy is
         configured, the default routes to ntfy instead — so notifications land
         somewhere reachable rather than a transport that can't be polled.
+
+        Discord is seeded as default only as a last resort — when it is the sole
+        configured transport and there is exactly one Discord channel (so the pick
+        is unambiguous). With multiple Discord channels no default is seeded, which
+        makes an un-named call fail loudly with the list of valid names.
         """
         if DEFAULT_CHANNEL in self.channels:
             return self
@@ -178,6 +224,17 @@ class Settings(BaseModel):
                 ntfy_topic=self.ntfy.default_topic,
                 description="Auto-created from ntfy.default_topic",
             )
+        elif self.bot is None:
+            discord_keys = [
+                k for k, c in self.channels.items() if c.transport == "discord"
+            ]
+            if len(discord_keys) == 1:
+                src = self.channels[discord_keys[0]]
+                self.channels[DEFAULT_CHANNEL] = ChannelConfig(
+                    transport="discord",
+                    discord_webhook_env=src.discord_webhook_env,
+                    description="Auto-created from the sole Discord channel",
+                )
         elif self.bot is not None:
             # bot present but polling disabled and no ntfy fallback — still seed a
             # default so send-only Telegram deployments have a target.
@@ -200,6 +257,26 @@ class Settings(BaseModel):
             if ch.chat_id is None:  # defensive; model validator already enforces
                 raise ConfigError(f"telegram channel {key!r} missing chat_id")
             return Destination(name=key, transport="telegram", chat_id=ch.chat_id)
+        if ch.transport == "discord":
+            env_name = ch.discord_webhook_env
+            if not env_name:  # defensive; model validator already enforces
+                raise ConfigError(
+                    f"discord channel {key!r} missing discord_webhook_env"
+                )
+            url = os.environ.get(env_name)
+            if not url:
+                raise ConfigError(
+                    f"discord channel {key!r}: env var {env_name!r} is not set "
+                    f"(check ~/.mcgram/.env)"
+                )
+            dc = self.discord or DiscordConfig()
+            return Destination(
+                name=key,
+                transport="discord",
+                discord_webhook_url=url,
+                discord_username=dc.username,
+                discord_avatar_url=dc.avatar_url,
+            )
         # ntfy: backfill topic from defaults; require ntfy section configured
         if self.ntfy is None:
             raise ConfigError(

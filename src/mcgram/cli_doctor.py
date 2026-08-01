@@ -9,8 +9,9 @@ from pathlib import Path
 import httpx
 from dotenv import load_dotenv
 
-from .config import Settings
-from .errors import AuthError, ConfigError, NtfyError, TelegramError
+from .config import DEFAULT_CHANNEL, Settings
+from .discord_client import DiscordClient
+from .errors import AuthError, ConfigError, DiscordError, NtfyError, TelegramError
 from .ntfy_client import NtfyClient
 from .tg_client import TelegramClient
 
@@ -135,6 +136,70 @@ async def _check_ntfy(settings: Settings, rows: list[str]) -> int:
     return failures
 
 
+async def _check_discord(settings: Settings, rows: list[str]) -> int:
+    """Verify every Discord channel: env var set, webhook live, test message sent.
+
+    Prints channel name + channel_id only — never the webhook URL or token."""
+    discord = {
+        name: ch for name, ch in settings.channels.items()
+        if ch.transport == "discord"
+    }
+    # Drop an auto-seeded `default` that merely mirrors a named channel's webhook,
+    # so the same endpoint isn't probed and messaged twice.
+    if DEFAULT_CHANNEL in discord:
+        dfl_env = discord[DEFAULT_CHANNEL].discord_webhook_env
+        if any(n != DEFAULT_CHANNEL and c.discord_webhook_env == dfl_env
+               for n, c in discord.items()):
+            discord.pop(DEFAULT_CHANNEL)
+    discord_channels = sorted(discord.items())
+    failures = 0
+    async with DiscordClient() as dc:
+        for name, ch in discord_channels:
+            try:
+                dest = settings.resolve_destination(name)
+            except ConfigError as e:
+                rows.append(_fail(f"discord {name}", str(e)))
+                failures += 1
+                continue
+            url = dest.discord_webhook_url
+            assert url is not None
+            # health() swallows network errors and returns None, so a None here
+            # can mean either an invalid webhook or an unreachable host — keep the
+            # message neutral rather than blaming the env var.
+            meta = await dc.health(url)
+            if meta is None:
+                rows.append(_fail(
+                    f"discord {name} health",
+                    f"could not verify webhook — unreachable or invalid "
+                    f"(check env {ch.discord_webhook_env} and network)",
+                ))
+                failures += 1
+                continue
+            rows.append(_ok(
+                f"discord {name}",
+                f"channel {meta.get('channel_id')} ({meta.get('name')})",
+            ))
+            try:
+                sent = await dc.send_message(
+                    url, f"mcgram doctor: discord OK — {name}",
+                    username=dest.discord_username, avatar_url=dest.discord_avatar_url,
+                )
+                rows.append(_ok(
+                    f"discord {name} send test", f"message_id={sent.get('id')}",
+                ))
+            except DiscordError as e:
+                rows.append(_fail(f"discord {name} send test", e.description))
+                failures += 1
+            except httpx.HTTPError as e:
+                # Interpolate the type name only — a raw httpx error can echo the
+                # request URL (which carries the webhook token).
+                rows.append(_fail(
+                    f"discord {name} send test", f"network/SSL error ({type(e).__name__})",
+                ))
+                failures += 1
+    return failures
+
+
 async def _run_checks(settings: Settings) -> tuple[int, list[str]]:
     rows: list[str] = []
     failures = 0
@@ -146,6 +211,8 @@ async def _run_checks(settings: Settings) -> tuple[int, list[str]]:
         failures += await _check_ntfy(settings, rows)
     else:
         rows.append(_skip("ntfy", "no `ntfy` section in config"))
+    if any(ch.transport == "discord" for ch in settings.channels.values()):
+        failures += await _check_discord(settings, rows)
     return failures, rows
 
 

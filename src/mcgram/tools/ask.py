@@ -94,7 +94,10 @@ async def handle(
         })
         return {
             "error": "transport_unsupported",
-            "reason": "ask requires a telegram channel (ntfy.sh has no 2-way input)",
+            "reason": (
+                f"ask requires a telegram channel — {dest.transport} is one-way "
+                "and has no reply path"
+            ),
             "channel": dest.name,
             "hint": "use send_message on this channel, or switch to a telegram channel",
         }

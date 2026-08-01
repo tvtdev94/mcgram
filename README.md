@@ -4,7 +4,7 @@
 
 # mcgram
 
-**Notification bridge for Claude Code** — Telegram **and** ntfy.sh. Claude can ping you, ask you, and remind you on your phone.
+**Notification bridge for Claude Code** — Telegram, ntfy.sh **and** Discord. Claude can ping you, ask you, and remind you on your phone or in a Discord channel.
 
 [![CI](https://github.com/tvtdev94/mcgram/actions/workflows/ci.yml/badge.svg)](https://github.com/tvtdev94/mcgram/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/mcgram.svg)](https://pypi.org/project/mcgram/)
@@ -21,7 +21,7 @@
 
 ## What it does
 
-Walk away from a long-running task. mcgram lets Claude **tap you on the shoulder** through Telegram or ntfy.sh — and lets you tap back (Telegram only).
+Walk away from a long-running task. mcgram lets Claude **tap you on the shoulder** through Telegram, ntfy.sh, or Discord — and lets you tap back (Telegram only).
 
 | | |
 |---|---|
@@ -29,8 +29,8 @@ Walk away from a long-running task. mcgram lets Claude **tap you on the shoulder
 | ❓ **Ask & wait** | Inline buttons (Approve / Cancel) with a timeout — Telegram only |
 | ⏰ **Remind** | "nhắc tôi sau 30 phút check container logs" |
 | 🎥 **Send video** | Demo recordings play right in-chat |
-| 🛰 **Multi-channel** | Route messages to named destinations across both transports |
-| 🌐 **No-token mode** | Use ntfy.sh on machines where `api.telegram.org` is blocked |
+| 🛰 **Multi-channel** | Route messages to named destinations across all three transports |
+| 🌐 **No-token mode** | Use ntfy.sh or a Discord webhook on machines where `api.telegram.org` is blocked |
 
 No daemon, no VPS, no webhook setup. Lives inside the MCP server while Claude Code is open — and runs in every session at once, not just the first.
 
@@ -97,29 +97,33 @@ Declare both `ntfy:` and `bot:` in config — each named channel picks its own t
 
 ## The 7 tools
 
-| Tool | Telegram | ntfy.sh | When to use |
-|---|:---:|:---:|---|
-| **`send_message`** | ✅ | ✅ | Notify on completion / send a status update |
-| **`send_file`** | ✅ | ✅ | Send logs, screenshots, generated artifacts |
-| **`send_video`** | ✅ | ✅ | Send a video that **plays in-chat** (mp4/mov/mkv/webm/m4v) |
-| **`ask`** | ✅ | ❌ | Question with inline buttons OR freetext, blocks until reply. Telegram-only, and only in the polling session |
-| **`set_reminder`** | ✅ | ✅ | Schedule an in-process reminder (per-session; lost on restart) |
-| **`cancel_reminder`** | — | — | Cancel a pending reminder |
-| **`list_reminders`** | — | — | List currently pending reminders |
+| Tool | Telegram | ntfy.sh | Discord | When to use |
+|---|:---:|:---:|:---:|---|
+| **`send_message`** | ✅ | ✅ | ✅ | Notify on completion / send a status update |
+| **`send_file`** | ✅ | ✅ | ✅ | Send logs, screenshots, generated artifacts |
+| **`send_video`** | ✅ | ✅ | ✅ | Send a video that **plays in-chat** (mp4/mov/mkv/webm/m4v) |
+| **`ask`** | ✅ | ❌ | ❌ | Question with inline buttons OR freetext, blocks until reply. Telegram-only, and only in the polling session |
+| **`set_reminder`** | ✅ | ✅ | ✅ | Schedule an in-process reminder (per-session; lost on restart) |
+| **`cancel_reminder`** | — | — | — | Cancel a pending reminder |
+| **`list_reminders`** | — | — | — | List currently pending reminders |
 
-ntfy.sh has no 2-way input, so `ask` returns `transport_unsupported` on ntfy channels — and `polling_not_owned` in a session that isn't the one polling Telegram ([why](#multiple-claude-code-sessions)). The companion [Claude Code skill](https://github.com/tvtdev94/mcgram/blob/main/src/mcgram/data/skill/SKILL.md) (installed by `mcgram init`) teaches Claude when to call which tool — both **English** and **Vietnamese** trigger phrases are recognized.
+ntfy.sh and Discord have no 2-way input, so `ask` returns `transport_unsupported` on those channels — and `polling_not_owned` in a Telegram session that isn't the one polling ([why](#multiple-claude-code-sessions)). The companion [Claude Code skill](https://github.com/tvtdev94/mcgram/blob/main/src/mcgram/data/skill/SKILL.md) (installed by `mcgram init`) teaches Claude when to call which tool — both **English** and **Vietnamese** trigger phrases are recognized.
+
+Discord `send_message` / `send_file` / `send_video` accept an optional `thread_id` to post into an existing thread. Discord has no default channel — always name it: `send_message(text="…", channel="eve")`.
 
 ## Channels
 
-Route messages to different destinations across both transports:
+Route messages to different destinations across all transports:
 
 ```bash
 mcgram channel add oncall -1001234567890 -d "Pager rotation"        # Telegram
 mcgram channel add-ntfy alerts -d "Build alerts"                     # ntfy.sh — auto-generates topic
 mcgram channel add-ntfy alerts --topic mcgram-myalerts -d "..."      # explicit topic
+mcgram channel add-discord eve -d "Eve product log"                 # Discord — prompts for webhook URL
 mcgram channel list
 #   alerts   ntfy      topic=mcgram-a1b2c3d4e5f6g7h8   Build alerts
 #   default  ntfy      topic=mcgram-xxxxxxxxxxxxxxxx   Auto-created from ntfy.default_topic
+#   eve      discord   env=MCGRAM_DISCORD_WEBHOOK_EVE   Eve product log
 #   oncall   telegram  chat_id=-1001234567890           Pager rotation
 ```
 
@@ -132,7 +136,7 @@ mcgram                          # MCP stdio server (Claude Code calls this)
 mcgram init [--force]           # scaffold ~/.mcgram/ + skill + auto-register MCP (generates ntfy topic)
 mcgram doctor                   # config + connectivity check (per-transport)
 mcgram audit [opts]             # analyze audit.jsonl: --since 1h, --tool ask, --rejected, --tail
-mcgram channel <action>         # list | add NAME CHAT_ID | add-ntfy NAME [--topic T] | remove NAME
+mcgram channel <action>         # list | add NAME CHAT_ID | add-ntfy NAME [--topic T] | add-discord NAME [--webhook U] | remove NAME
 mcgram install-skill [--force]  # reinstall ~/.claude/skills/mcgram/SKILL.md
 ```
 
@@ -171,6 +175,10 @@ channels:                          # optional named destinations
     transport: ntfy
     ntfy_topic: mcgram-alerts-x9k2
     description: Build alerts
+  eve:                             # Discord channel (webhook URL lives in ~/.mcgram/.env)
+    transport: discord
+    discord_webhook_env: MCGRAM_DISCORD_WEBHOOK_EVE
+    description: Eve product log
 
 audit:
   path: ~/.mcgram/audit.jsonl

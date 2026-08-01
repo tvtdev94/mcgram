@@ -7,14 +7,16 @@ mcgram is a **personal** tool: one user, one bot, one chat, running on a develop
 ## Trust boundaries
 
 ```
-[ Claude Code ] ── stdio ── [ mcgram process ] ── HTTPS ── [ Telegram Bot API ] ── [ Operator's phone ]
+[ Claude Code ] ── stdio ── [ mcgram process ] ── HTTPS ── [ Telegram Bot API ]
+                                    │              ├── [ ntfy.sh API ]
+                                    │              └── [ Discord Webhooks ]
                                     │
                                     └── ~/.mcgram/{config.yaml, .env, audit.jsonl, .lock}
 ```
 
-- **In trust boundary:** the mcgram process, its config dir, the local Claude Code session.
-- **Outside:** Telegram's servers, the public internet, anyone who could intercept TLS or compromise the bot account.
-- **Adversary:** prompt injection inside Claude's context that tries to abuse the tools; a stolen bot token; someone who guesses the bot username and DMs it.
+- **In trust boundary:** the mcgram process, its config dir (`~/.mcgram/`), the local Claude Code session.
+- **Outside:** Telegram's servers, Discord's servers, ntfy.sh, the public internet, anyone who could intercept TLS or compromise credentials.
+- **Adversary:** prompt injection inside Claude's context that tries to abuse the tools; a stolen bot token or Discord webhook URL; someone who guesses the bot username and DMs it.
 
 ## STRIDE
 
@@ -32,8 +34,9 @@ mcgram is a **personal** tool: one user, one bot, one chat, running on a develop
 | Threat | Mitigation |
 |---|---|
 | Local malware modifies `~/.mcgram/audit.jsonl` to hide its tracks | Out of scope — local code execution beats anything in user space. Audit is best-effort forensics, not tamper-proof. |
-| Stolen bot token used elsewhere | Token lives in `~/.mcgram/.env`, never in stdout, never in audit. Recommend chmod 600 on Unix. Rotate via @BotFather → `/revoke` if compromised. |
-| MITM on Telegram API | httpx uses HTTPS with system trust store. Pinning is not implemented. |
+| Stolen Telegram bot token used elsewhere | Token lives in `~/.mcgram/.env`, never in stdout, never in audit, never in `config.yaml`. Recommend chmod 600 on Unix. Rotate via @BotFather → `/revoke` if compromised. |
+| Stolen Discord webhook URL used elsewhere | Webhook URL (address + secret) lives in `~/.mcgram/.env` only, never in `config.yaml`, stdout, error messages, or audit. `config.yaml` stores only the env var name (e.g., `discord_webhook_env: DISCORD_EVE`). Audit logs only the numeric webhook ID (via `webhook_id_from_url`) + thread_id, never the full URL. Regenerate via Discord Server Settings → Integrations → Webhooks if compromised. |
+| MITM on Telegram / Discord / ntfy API | httpx uses HTTPS with system trust store. Pinning is not implemented. |
 
 ### R — Repudiation
 
@@ -47,8 +50,11 @@ mcgram is a **personal** tool: one user, one bot, one chat, running on a develop
 | Threat | Mitigation |
 |---|---|
 | Bot token leaks via logs / stdout / audit | Token never written to any output. `mcgram doctor` masks token (`***last4`). `mcgram init` instructions explicitly tell user to gitignore `.env`. |
+| Discord webhook URL leaks via logs / stdout / audit | Webhook URL never written to any output. Audit logs only the numeric webhook ID (extracted via `webhook_id_from_url`, which never accesses the token part). `mcgram doctor` confirms webhook liveness but never echoes the URL. `mcgram channel list` shows only the env var name. Error messages from Discord API carry only Discord's message, not the webhook URL. |
+| `mcgram channel add-discord` webhook URL appears in shell history | `--webhook <URL>` flag is visible in history. **Safer:** omit the flag and use the secure `getpass` prompt (piped input, not echoed). Recommended: `mcgram channel add-discord eve` (no flag) and enter the URL when prompted. |
 | Prompt injection makes Claude `send_file(/etc/passwd)` or similar | `send_file` rejects paths outside CWD by default. Operator can opt-in `allow_outside_cwd: true` — explicitly documented as a trust trade-off. |
 | Telegram-side: sent files are stored on Telegram servers | True for all bots. Don't send secrets. Use `send_message` for short notifications, not for forwarding production data. Audit redaction (`redact_text`) protects the local log but cannot un-send a Telegram message. |
+| Discord-side: sent files are stored on Discord servers | True for Discord webhooks. Don't send secrets. |
 | Claude leaks operator chat ID into a public log | `chat_id` is logged in audit. It's not a secret per se (anyone who DMs the bot will see it). Treat it like a user ID. |
 
 ### D — Denial of service
@@ -76,8 +82,9 @@ mcgram is a **personal** tool: one user, one bot, one chat, running on a develop
 - Compromised local user account (anything in user space)
 - Compromised Claude Code itself (it owns stdio)
 - Compromised Telegram account (bot token theft has the same effect as a stolen password)
-- Sophisticated traffic analysis of the user's home IP ↔ Telegram servers
-- Anyone with `~/.mcgram/` read access — they have your bot token
+- Compromised Discord server (webhook URL theft lets someone POST to your channel)
+- Sophisticated traffic analysis of the user's home IP ↔ Telegram / Discord / ntfy servers
+- Anyone with `~/.mcgram/` read access — they have your bot token + all Discord webhook URLs
 
 ## Reporting issues
 

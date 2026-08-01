@@ -1,10 +1,10 @@
 ---
 name: mcgram
-description: Notification bridge for Claude Code (Telegram + ntfy.sh) — send notifications, ask short questions, set reminders via the user's personal bot or ntfy topic.
-when_to_use: The user wants to be notified (Telegram or ntfy.sh) when a task finishes, wants to be asked a short approve/reject/pick question before a risky action, wants to be reminded after N minutes, or asks to send a file (log, screenshot, artifact) to their phone.
+description: Notification bridge for Claude Code (Telegram + ntfy.sh + Discord) — send notifications, ask short questions, set reminders via the user's personal bot, ntfy topic, or Discord webhook.
+when_to_use: The user wants to be notified (Telegram, ntfy.sh, or Discord) when a task finishes, wants to be asked a short approve/reject/pick question before a risky action, wants to be reminded after N minutes, or asks to send a file (log, screenshot, artifact) to their phone or a Discord channel.
 ---
 
-# mcgram — notification bridge (Telegram + ntfy.sh)
+# mcgram — notification bridge (Telegram + ntfy.sh + Discord)
 
 Use this skill when the user says: "báo telegram khi xong", "tell me on Telegram when done",
 "gửi qua ntfy", "push to my phone", "nhắc tôi", "remind me in X minutes",
@@ -25,20 +25,33 @@ Use this skill when the user says: "báo telegram khi xong", "tell me on Telegra
 | "Hủy lời nhắc" / "cancel reminder" | `cancel_reminder` | `cancel_reminder(reminder_id="r_abc")` |
 | "Xem các nhắc hiện tại" / "list reminders" | `list_reminders` | `list_reminders()` |
 
-## Transport awareness (Telegram vs ntfy.sh)
+## Transport awareness (Telegram vs ntfy.sh vs Discord)
 
-The user may configure **Telegram**, **ntfy.sh**, or **both**. Each channel declares its transport. Most tools work on either, but `ask` is **Telegram-only** (ntfy.sh has no 2-way input).
+The user may configure **Telegram**, **ntfy.sh**, **Discord**, or any mix. Each channel declares its transport. Most tools work on all three, but `ask` is **Telegram-only** (ntfy.sh and Discord have no 2-way input).
 
-| Tool | Telegram | ntfy.sh |
-|---|---|---|
-| `send_message`, `send_file`, `send_video` | ✅ | ✅ |
-| `set_reminder`, `cancel_reminder`, `list_reminders` | ✅ | ✅ |
-| `ask` | ✅ (polling session only) | ❌ returns `transport_unsupported` |
+| Tool | Telegram | ntfy.sh | Discord |
+|---|---|---|---|
+| `send_message`, `send_file`, `send_video` | ✅ | ✅ | ✅ |
+| `set_reminder`, `cancel_reminder`, `list_reminders` | ✅ | ✅ | ✅ |
+| `ask` | ✅ (polling session only) | ❌ `transport_unsupported` | ❌ `transport_unsupported` |
 
 If `ask` returns `error: "transport_unsupported"`, **do not retry**. Tell the user:
-"This channel uses ntfy.sh which doesn't support 2-way input. I'll send a notification instead and proceed with a safe default — or switch to a telegram channel if you want me to wait for your reply."
+"This channel is one-way (ntfy.sh / Discord) and doesn't support 2-way input. I'll send a notification instead and proceed with a safe default — or switch to a telegram channel if you want me to wait for your reply."
 
-Each tool response includes a `transport` field (`"telegram"` or `"ntfy"`) so you know what got used.
+Each tool response includes a `transport` field (`"telegram"`, `"ntfy"`, or `"discord"`) so you know what got used.
+
+### Discord specifics
+
+- **When to use it:** the user says "log to discord", "post to #eve", or names a Discord channel they registered.
+- **Channel name is REQUIRED.** Discord has no default channel — always pass `channel="<name>"`. Calling without a name errors with `unknown_channel` listing valid names. Never guess a name.
+- **Threads:** pass `thread_id="<id>"` ONLY when the user gives you a thread ID. Omit it to post to the base channel. mcgram cannot create a new thread — the thread must already exist. `thread_id` on a non-Discord channel is ignored (response carries a `note`).
+- **No `ask`:** Discord is one-way. For confirmations, use a Telegram channel.
+
+```python
+send_message(text="deploy done", channel="eve")                 # base channel
+send_message(text="deploy done", channel="eve", thread_id="1532959062499659987")  # into a thread
+send_file(path="./out.log", channel="eve", caption="build log")
+```
 
 ## `ask` needs the polling session
 
@@ -76,6 +89,7 @@ set_reminder(text="rotate keys", delay_s=3600, channel="security")
 mcgram channel list                                          # show all channels + transports
 mcgram channel add oncall -1001234567890 -d "Pager"          # Telegram channel
 mcgram channel add-ntfy alerts --topic mcgram-x9k2 -d "..."  # ntfy channel (random topic if --topic omitted)
+mcgram channel add-discord eve                               # Discord channel (prompts for webhook URL)
 mcgram channel remove oncall
 ```
 
@@ -84,7 +98,8 @@ mcgram channel remove oncall
 ## Defaults & limits
 
 - `ask` timeout default 120s, max 600s. **`ask` BLOCKS the Claude Code session** until reply or timeout — keep timeouts short.
-- `send_file` size cap **50 MB** for Telegram. ntfy.sh public free tier ~15 MB; self-hosted may be higher. If a large file fails on ntfy, suggest the user split it or self-host.
+- `send_file` size cap **50 MB** for Telegram. ntfy.sh public free tier ~15 MB; self-hosted may be higher; Discord **25 MB**. If a large file fails, suggest the user split it or self-host.
+- `send_message` text cap: **4096 chars** on Telegram/ntfy, **2000 chars** on Discord. Over the cap returns `text_too_long` with the transport's `max` — split or send as a file.
 - Caption max 1024 chars (Telegram limit) — auto-truncated with ellipsis.
 - Max **10 pending reminders**. Max delay **24h**. Reminders **lost on Claude Code shutdown** — don't promise long-term reminders.
 - Max **6 buttons** per `ask`. Use freetext (no `options`) for open-ended answers.
@@ -93,16 +108,16 @@ mcgram channel remove oncall
 ## Error recovery
 
 - `rate_limit_exceeded` → wait 60s, retry.
-- `transport_unsupported` (from `ask` on a ntfy channel) → do **NOT** retry. Send a notification with `send_message` and proceed with a safe default, OR ask the user to switch to a telegram channel.
+- `transport_unsupported` (from `ask` on a ntfy or Discord channel) → do **NOT** retry. Send a notification with `send_message` and proceed with a safe default, OR ask the user to switch to a telegram channel.
 - `polling_not_owned` (from `ask`) → another Claude Code session owns the Telegram connection. Do **NOT** retry here. `send_message` / `set_reminder` still work in this session — use them and proceed with a safe default, or point the user at the session in `poll_owner_pid`.
 - `polling_disabled` / `telegram_not_configured` (from `ask`) → this machine can't do 2-way Telegram at all. Same handling as above, but it's a config choice, not contention.
 - `transport_unavailable` → the channel's transport client isn't initialized (e.g. ntfy channel but no `ntfy` section in config). Tell the user to fix config.
 - `path_outside_cwd` → only files inside CWD are sendable. Ask the user to enable `allow_outside_cwd`, or move the file.
 - `file_too_large` → file exceeds the size cap. Compress, split, or summarize.
 - `ask` returning `source: "timeout"` → user didn't reply. Decide: retry, default, or abort.
-- `text_too_long` → text exceeds 4096 chars; split or send as a file.
+- `text_too_long` → text exceeds the transport cap (`max` in the response: 4096 Telegram/ntfy, 2000 Discord); split or send as a file.
 - `reminder_max_pending` → too many pending reminders. Cancel some via `cancel_reminder`.
-- `telegram_api` / `ntfy_api` → transport error from the upstream service. Read the `reason` field for details.
+- `telegram_api` / `ntfy_api` / `discord_api` → transport error from the upstream service. Read the `reason` field for details (Discord maps common causes: bad webhook, wrong `thread_id`, rate limit).
 
 ## How `ask` resolves (Telegram only)
 

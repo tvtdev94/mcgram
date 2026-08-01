@@ -18,6 +18,7 @@ from mcp.types import TextContent, Tool
 from . import __version__
 from .audit import AuditLog
 from .config import Settings
+from .discord_client import DiscordClient
 from .errors import ConfigError, MCGramError
 from .ntfy_client import NtfyClient
 from .poll_ownership import PollOwnership, cancel_task
@@ -109,7 +110,7 @@ async def _run() -> None:
     )
     rate = RateLimiter(settings.defaults.rate_limit_per_min)
     dispatcher = UpdateDispatcher()
-    async with _build_clients(settings) as (tg_client, ntfy_client):
+    async with _build_clients(settings) as (tg_client, ntfy_client, discord_client):
         state = AppState(
             settings=settings,
             dispatcher=dispatcher,
@@ -117,6 +118,7 @@ async def _run() -> None:
             audit=audit,
             client=tg_client,
             ntfy_client=ntfy_client,
+            discord_client=discord_client,
         )
         _wire_phase3(state)
         ownership, poll_task = _start_polling(state, settings)
@@ -176,6 +178,7 @@ async def _build_clients(settings: Settings):
     """
     tg_client: TelegramClient | None = None
     ntfy_client: NtfyClient | None = None
+    discord_client: DiscordClient | None = None
     async with contextlib.AsyncExitStack() as stack:
         if settings.bot is not None:
             try:
@@ -198,7 +201,16 @@ async def _build_clients(settings: Settings):
             ntfy_client = await stack.enter_async_context(
                 NtfyClient(settings.ntfy.server, access_token=ntfy_token)
             )
-        yield tg_client, ntfy_client
+        # Build the Discord client when the `discord:` section is present OR any
+        # channel routes to discord — a user can declare channels and omit the
+        # section entirely (every discord: field has a default). The client holds
+        # no credential at construction, so there is no token failure path here.
+        needs_discord = settings.discord is not None or any(
+            c.transport == "discord" for c in settings.channels.values()
+        )
+        if needs_discord:
+            discord_client = await stack.enter_async_context(DiscordClient())
+        yield tg_client, ntfy_client, discord_client
 
 
 def _wire_phase3(state: AppState) -> None:

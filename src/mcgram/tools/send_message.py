@@ -5,20 +5,28 @@ from __future__ import annotations
 import time
 from typing import Any
 
+from ..discord_client import webhook_id_from_url
 from ..dispatch import send_text
-from ..errors import ConfigError, NtfyError, RateLimitError, TelegramError
+from ..errors import ConfigError, DiscordError, NtfyError, RateLimitError, TelegramError
 from ..runtime import AppState
 
 TOOL_NAME = "send_message"
-_MAX_TEXT = 4096  # Telegram hard cap (ntfy allows more; keep unified)
+# Text hard caps differ per transport; resolved after we know the destination.
+_MAX_TEXT_BY_TRANSPORT = {
+    "telegram": 4096,  # Telegram hard cap
+    "ntfy": 4096,      # ntfy allows more; keep the prior unified cap unchanged
+    "discord": 2000,   # Discord hard limit
+}
+_DEFAULT_MAX_TEXT = 4096
 
 
 def schema() -> dict[str, Any]:
     return {
         "name": TOOL_NAME,
         "description": (
-            "Send a text message to a configured channel (Telegram or ntfy.sh). "
-            "Use for progress updates, completion pings, error reports."
+            "Send a text message to a configured channel (Telegram, ntfy.sh, or "
+            "Discord). Use for progress updates, completion pings, error reports. "
+            "Discord channels have no default — name the channel explicitly."
         ),
         "inputSchema": {
             "type": "object",
@@ -38,6 +46,13 @@ def schema() -> dict[str, Any]:
                     "enum": ["plain", "markdown_v2"],
                     "description": "Telegram-only override. ntfy channels ignore.",
                 },
+                "thread_id": {
+                    "type": "string",
+                    "description": (
+                        "Discord only: ID of an existing thread to post into. Omit "
+                        "to post to the base channel. Telegram/ntfy ignore it."
+                    ),
+                },
             },
             "required": ["text"],
         },
@@ -46,17 +61,21 @@ def schema() -> dict[str, Any]:
 
 async def handle(state: AppState, *, text: str, channel: str | None = None,
                  silent: bool = False,
-                 parse_mode: str | None = None) -> dict[str, Any]:
+                 parse_mode: str | None = None,
+                 thread_id: str | None = None) -> dict[str, Any]:
     if not text or not isinstance(text, str):
         return {"error": "invalid_input", "reason": "text_required"}
-    if len(text) > _MAX_TEXT:
-        return {"error": "invalid_input", "reason": "text_too_long", "max": _MAX_TEXT}
+    # Resolve first — the text length cap depends on the destination transport.
     try:
         dest = state.settings.resolve_destination(channel)
     except ConfigError as e:
         state.audit.write({"tool": TOOL_NAME, "status": "rejected",
                            "reason": "unknown_channel", "channel": channel})
         return {"error": "invalid_input", "reason": "unknown_channel", "detail": str(e)}
+    max_text = _MAX_TEXT_BY_TRANSPORT.get(dest.transport, _DEFAULT_MAX_TEXT)
+    if len(text) > max_text:
+        return {"error": "invalid_input", "reason": "text_too_long",
+                "max": max_text, "transport": dest.transport}
     if not state.rate.try_acquire(TOOL_NAME):
         state.audit.write({"tool": TOOL_NAME, "status": "rejected", "reason": "rate_limit"})
         raise RateLimitError(TOOL_NAME)
@@ -69,8 +88,9 @@ async def handle(state: AppState, *, text: str, channel: str | None = None,
             state, dest, text,
             silent=silent,
             parse_mode=api_parse_mode if dest.transport == "telegram" else None,
+            thread_id=thread_id,
         )
-    except (TelegramError, NtfyError) as e:
+    except (TelegramError, NtfyError, DiscordError) as e:
         state.audit.write({
             "tool": TOOL_NAME, "status": "error",
             "transport": dest.transport, "channel": dest.name,
@@ -83,12 +103,20 @@ async def handle(state: AppState, *, text: str, channel: str | None = None,
                            "reason": "transport_unavailable", "channel": dest.name})
         return {"error": "transport_unavailable", "reason": str(e)}
     ms = int((time.monotonic() - t0) * 1000)
-    state.audit.write({
+    record: dict[str, Any] = {
         "tool": TOOL_NAME, "status": "ok",
         "transport": dest.transport, "channel": dest.name,
         "chat_id": dest.chat_id, "ntfy_topic": dest.ntfy_topic,
         "text": text, "text_len": len(text), "ms": ms,
         "message_id": sent["message_id"],
-    })
-    return {"ok": True, "message_id": sent["message_id"],
-            "channel": dest.name, "transport": dest.transport}
+    }
+    if dest.transport == "discord":
+        # Audit the webhook ID only — never the full URL (it carries the token).
+        record["discord_webhook_id"] = webhook_id_from_url(dest.discord_webhook_url or "")
+        record["thread_id"] = thread_id
+    state.audit.write(record)
+    result: dict[str, Any] = {"ok": True, "message_id": sent["message_id"],
+                              "channel": dest.name, "transport": dest.transport}
+    if thread_id is not None and dest.transport != "discord":
+        result["note"] = f"thread_id ignored for {dest.transport}"
+    return result

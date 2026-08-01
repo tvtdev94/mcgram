@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from .audit import AuditLog
     from .config import Settings
+    from .discord_client import DiscordClient
     from .ntfy_client import NtfyClient
     from .rate_limiter import RateLimiter
     from .tg_client import TelegramClient
@@ -27,6 +28,8 @@ class AppState:
     client: TelegramClient | None = None
     # ntfy.sh (None when no `ntfy` section in config)
     ntfy_client: NtfyClient | None = None
+    # Discord (None when no discord channel/section in config)
+    discord_client: DiscordClient | None = None
     # Filled in Phase 3.
     # ask_registry is set ONLY while this process owns the Telegram poll loop —
     # resolving an ask needs the inbound update that only the poller receives.

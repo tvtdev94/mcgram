@@ -80,12 +80,13 @@ def test_build_clients_skips_telegram_when_token_missing_and_polling_disabled(
     )
 
     async def _exercise() -> tuple:
-        async with server_module._build_clients(settings) as pair:
-            return pair
+        async with server_module._build_clients(settings) as triple:
+            return triple
 
-    tg, nt = asyncio.run(_exercise())
+    tg, nt, dc = asyncio.run(_exercise())
     assert tg is None
     assert nt is not None
+    assert dc is None
 
 
 def test_build_clients_raises_when_token_missing_and_polling_enabled(

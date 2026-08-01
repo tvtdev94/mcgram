@@ -5,6 +5,54 @@ All notable changes to mcgram will be documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.4.0] — 2026-08-01
+
+### Added
+- **Discord webhook transport** — one-way push to Discord channels via incoming
+  webhooks. Each webhook maps to one mcgram channel; declare as many as needed.
+  `ask` is not supported (Discord webhooks have no reply path).
+- `DiscordClient` async HTTP wrapper (`src/mcgram/discord_client.py`) with
+  `send_message` / `send_file` / `send_video` / `health`, plus `DiscordError`
+  mapping Discord error codes (10015 Unknown Webhook, 10003 bad `thread_id`,
+  429 rate limit, …) to human-readable reasons.
+- Runtime `thread_id` support: `send_message` / `send_file` / `send_video` accept
+  an optional `thread_id` to post into an existing Discord thread (query-string
+  parameter, per the Discord API). Ignored by Telegram/ntfy (response carries a
+  `note`). `thread_id` is a per-call argument, never stored in config.
+- `Settings.discord: DiscordConfig | None` — shared display identity
+  (`username` default `"mcgram"`, optional `avatar_url`). Credentials never
+  live in config: `ChannelConfig.discord_webhook_env` names an env var holding
+  the webhook URL, read from `~/.mcgram/.env`.
+- `LimitsConfig.discord_file_max_bytes: int = 26214400` — 25 MB effective
+  `send_file` / `send_video` cap for Discord channels.
+- CLI:
+  - `mcgram channel add-discord NAME [--webhook URL] [--env-name E] [-d DESC]` —
+    validates the webhook live before writing, prompts securely for the URL when
+    `--webhook` is omitted, and never echoes the URL.
+  - `mcgram channel list` shows Discord channels as `env=<VAR>` (no URL).
+  - `mcgram doctor` checks every Discord channel (webhook liveness + a test send).
+  - `mcgram init` offers interactive Discord setup when run in a terminal.
+- `env_file.upsert_env_var` — atomic, 0o600, in-place credential writes to
+  `~/.mcgram/.env` that preserve existing lines (e.g. `MCGRAM_BOT_TOKEN`).
+
+### Changed
+- Config must now declare AT LEAST ONE of `bot`, `ntfy`, or a Discord channel.
+  Telegram-only and ntfy-only configs load unchanged.
+- `send_message` text length is now capped per transport (Telegram/ntfy 4096,
+  Discord 2000). The check runs **after** channel resolution (the cap depends on
+  the transport), so a call that is both an unknown channel and over-length now
+  reports `unknown_channel` first.
+- Tool responses / audit records `transport` field can now be `"discord"`.
+  Discord audit records add `discord_webhook_id` (the numeric ID only — never the
+  token) and `thread_id`.
+
+### Security
+- Discord webhook URLs (address + secret) are stored only in `~/.mcgram/.env`,
+  never in `config.yaml`, stdout, or the audit log. Audit records the webhook ID
+  segment only. CLI/doctor print channel names and IDs, never the URL.
+
+[0.4.0]: https://github.com/tvtdev94/mcgram/releases/tag/v0.4.0
+
 ## [0.3.0] — 2026-07-27
 
 ### Fixed

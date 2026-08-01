@@ -27,6 +27,11 @@ def _require_client(state: AppState, dest: Destination) -> None:
             f"channel {dest.name!r} uses ntfy transport but no ntfy client "
             "is configured (missing `ntfy` section in config)"
         )
+    if dest.transport == "discord" and state.discord_client is None:
+        raise ConfigError(
+            f"channel {dest.name!r} uses discord transport but no Discord client "
+            "is configured"
+        )
 
 
 async def send_text(
@@ -36,13 +41,29 @@ async def send_text(
     *,
     silent: bool = False,
     parse_mode: str | None = None,
+    thread_id: str | None = None,
 ) -> dict[str, Any]:
-    """Dispatch a text message. Returns a dict with `message_id` (str/int)."""
+    """Dispatch a text message. Returns a dict with `message_id` (str/int).
+
+    `thread_id` is honored only by discord (a per-call runtime target); the
+    other transports have no second addressing layer and ignore it.
+    """
     _require_client(state, dest)
     if dest.transport == "ntfy":
         assert state.ntfy_client is not None and dest.ntfy_topic is not None
         result = await state.ntfy_client.send_message(
             dest.ntfy_topic, text, silent=silent,
+        )
+        return {"message_id": result.get("id")}
+    if dest.transport == "discord":
+        assert state.discord_client is not None
+        assert dest.discord_webhook_url is not None
+        result = await state.discord_client.send_message(
+            dest.discord_webhook_url, text,
+            thread_id=thread_id,
+            username=dest.discord_username,
+            avatar_url=dest.discord_avatar_url,
+            silent=silent,
         )
         return {"message_id": result.get("id")}
     # telegram
@@ -62,13 +83,26 @@ async def send_document(
     *,
     caption: str | None = None,
     silent: bool = False,
+    thread_id: str | None = None,
 ) -> dict[str, Any]:
-    """Dispatch a file attachment."""
+    """Dispatch a file attachment. `thread_id` is discord-only (see send_text)."""
     _require_client(state, dest)
     if dest.transport == "ntfy":
         assert state.ntfy_client is not None and dest.ntfy_topic is not None
         result = await state.ntfy_client.send_file(
             dest.ntfy_topic, path, caption=caption, silent=silent,
+        )
+        return {"message_id": result.get("id")}
+    if dest.transport == "discord":
+        assert state.discord_client is not None
+        assert dest.discord_webhook_url is not None
+        result = await state.discord_client.send_file(
+            dest.discord_webhook_url, path,
+            content=caption,
+            thread_id=thread_id,
+            username=dest.discord_username,
+            avatar_url=dest.discord_avatar_url,
+            silent=silent,
         )
         return {"message_id": result.get("id")}
     assert state.client is not None and dest.chat_id is not None
@@ -85,13 +119,28 @@ async def send_video_file(
     *,
     caption: str | None = None,
     silent: bool = False,
+    thread_id: str | None = None,
 ) -> dict[str, Any]:
-    """Dispatch a video file (Telegram inline player or ntfy mobile inline)."""
+    """Dispatch a video file (Telegram inline player or ntfy mobile inline).
+
+    `thread_id` is discord-only (see send_text)."""
     _require_client(state, dest)
     if dest.transport == "ntfy":
         assert state.ntfy_client is not None and dest.ntfy_topic is not None
         result = await state.ntfy_client.send_video(
             dest.ntfy_topic, path, caption=caption, silent=silent,
+        )
+        return {"message_id": result.get("id")}
+    if dest.transport == "discord":
+        assert state.discord_client is not None
+        assert dest.discord_webhook_url is not None
+        result = await state.discord_client.send_video(
+            dest.discord_webhook_url, path,
+            content=caption,
+            thread_id=thread_id,
+            username=dest.discord_username,
+            avatar_url=dest.discord_avatar_url,
+            silent=silent,
         )
         return {"message_id": result.get("id")}
     assert state.client is not None and dest.chat_id is not None

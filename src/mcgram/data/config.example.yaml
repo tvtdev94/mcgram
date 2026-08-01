@@ -1,5 +1,5 @@
 # mcgram config — copy to ~/.mcgram/config.yaml (or set MCGRAM_CONFIG=/path/to/file).
-# At least ONE transport must be configured (ntfy or bot, or both).
+# At least ONE transport must be configured (ntfy, bot, or a Discord channel).
 
 # === Transport A: ntfy.sh (fastest, no token) =============================
 # Subscribe to `default_topic` from the ntfy mobile app / web UI to receive pings.
@@ -19,6 +19,20 @@ ntfy:
 #   disable_polling: {{TG_DISABLE_POLLING}}   # auto-detected at init: true = api.telegram.org
 #                                   # looked unreachable (send-only, no `ask`); false = reachable
 
+# === Transport C: Discord (webhook, one-way) ==============================
+# Each webhook is bound to one Discord channel. Declare one mcgram channel per
+# webhook (see "Named channels" below). The URL is BOTH address and secret — it
+# NEVER goes here; it lives in ~/.mcgram/.env. Easiest setup:
+#     mcgram channel add-discord --name eve
+# `discord:` below is only the shared display identity (optional — every field
+# has a default). One-way: `ask` is not supported on Discord channels.
+# discord:
+#   username: "mcgram"              # display name shown on Discord
+#   avatar_url:                     # optional; must be http(s) if set
+#
+# Post into a thread: pass `thread_id` when calling the tool, not here. Webhooks
+# cannot create a new thread in a text channel — the thread must already exist.
+
 defaults:
   parse_mode: plain               # plain | markdown_v2 (default plain)
   ask_timeout_s: 120              # default per-ask wait (1..600)
@@ -30,6 +44,7 @@ limits:
   reminder_max_pending: 10        # max concurrent in-flight reminders
   file_max_bytes: 52428800        # 50 MB hard cap (Telegram limit)
   ntfy_file_max_bytes: 15728640   # 15 MB effective cap for ntfy channels (public free tier)
+  discord_file_max_bytes: 26214400  # 25 MB effective cap for Discord webhooks
   ask_options_max: 6              # max inline-keyboard buttons per ask
   caption_max_chars: 1024         # Telegram caption hard limit
   reminder_text_max_chars: 1000   # abuse guard
@@ -56,6 +71,9 @@ allow_outside_cwd: false
 #   team:
 #     transport: telegram
 #     chat_id: -1001234567890
+#   eve:
+#     transport: discord
+#     discord_webhook_env: MCGRAM_DISCORD_WEBHOOK_EVE   # webhook URL lives in .env
 
 # Override only for testing against a mock Telegram server.
 # api_root: https://api.telegram.org

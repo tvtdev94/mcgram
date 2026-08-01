@@ -14,6 +14,7 @@ src/mcgram/
 ├── cli_init.py             # `mcgram init` — scaffold + install skill
 ├── cli_doctor.py           # `mcgram doctor` — config + connectivity checks
 ├── cli_audit.py            # `mcgram audit` — JSONL analyzer
+├── cli_channel.py          # `mcgram channel` — add/list Discord/Telegram/ntfy
 ├── server.py               # MCP stdio bootstrap; wires polling + tools
 │
 ├── config.py               # pydantic Settings (YAML + .env)
@@ -22,19 +23,22 @@ src/mcgram/
 ├── errors.py               # exception hierarchy
 ├── audit.py                # JSONL writer + rotation + retention + redact
 │
-├── tg_client.py            # httpx async wrapper around Bot API
-├── update_dispatcher.py    # fan-out + operator allowlist
-├── polling.py              # long-poll loop with exponential backoff
+├── tg_client.py            # httpx async wrapper around Telegram Bot API
+├── ntfy_client.py          # httpx async wrapper around ntfy.sh
+├── discord_client.py       # httpx async wrapper around Discord webhooks
+├── update_dispatcher.py    # fan-out + operator allowlist (Telegram only)
+├── polling.py              # long-poll loop with exponential backoff (Telegram only)
 ├── rate_limiter.py         # per-tool token bucket
 ├── runtime.py              # AppState dataclass
 │
-├── ask_registry.py         # PendingAsk + button/freetext/timeout resolver
+├── ask_registry.py         # PendingAsk + button/freetext/timeout resolver (Telegram only)
 ├── reminders.py            # in-process asyncio.Task scheduler
 ├── skill_installer.py      # bundled Claude skill installer
 │
 ├── tools/
 │   ├── send_message.py
 │   ├── send_file.py
+│   ├── send_video.py
 │   ├── ask.py
 │   ├── set_reminder.py
 │   ├── cancel_reminder.py
@@ -46,6 +50,41 @@ src/mcgram/
 ```
 
 Every module is < 200 LOC.
+
+## Transports
+
+mcgram supports three transports, each with different capabilities and constraints:
+
+### Telegram (polling, two-way)
+- Requires a bot token (`MCGRAM_BOT_TOKEN`), stored in `~/.mcgram/.env`
+- Long-polls `getUpdates` to receive inbound messages (one client per bot token per machine)
+- Supports `ask` (operator replies directly to the message button or freetext field)
+- Tools: `send_message`, `send_file`, `ask`, `set_reminder` (all use the inbound channel)
+- Enabled by `bot:` section in config.yaml
+
+### ntfy.sh (one-way, no registration)
+- No credentials needed (ntfy topics are unguessable UUIDs or password-protected)
+- Send-only via HTTP POST to a public service
+- Fallback for polling-disabled deployments
+- Enabled by `ntfy:` section in config.yaml
+
+### Discord (one-way, webhook-only)
+- Webhook URL = address + secret (the full URL itself is the credential), stored in `~/.mcgram/.env`
+- Send-only via HTTP POST to the webhook URL
+- **No polling**, no `ask` support — returns `transport_unsupported` immediately
+- Optional thread targeting: `thread_id` is passed at call time (query param, not body), never stored on the Destination
+- One webhook URL per Discord channel = one mcgram destination
+- Global `discord:` section holds display identity only (username, optional avatar_url)
+- Enabled by defining channels with `transport: discord` in config.yaml
+
+## Client construction
+
+`server._build_clients` yields a 3-tuple `(tg_client, ntfy_client, discord_client)` where:
+- `tg_client` is `TelegramClient | None` (None if no bot section)
+- `ntfy_client` is `NtfyClient | None` (None if no ntfy section)
+- `discord_client` is `DiscordClient | None` (None if no Discord channels)
+
+Unlike TelegramClient and NtfyClient, which take credentials at init (`__init__`), DiscordClient is credential-agnostic — the webhook URL is passed to each method call (`send_message(webhook_url, ...)`, `send_file(webhook_url, ...)`). This design lets one client instance serve many Discord webhook URLs.
 
 ## Lifecycle
 
@@ -100,14 +139,18 @@ sequenceDiagram
 
 1. `tools/send_file.py::handle` resolves path, rejects if non-existent / not regular file / size > cap / outside CWD (unless `allow_outside_cwd`)
 2. Rate-limit token
-3. `httpx` multipart POST to `sendDocument`
-4. Audit `{tool:"send_file", status:"ok", bytes, ms, message_id}`
+3. Transport-specific dispatch:
+   - **Telegram:** `httpx` multipart POST to `sendDocument`
+   - **Discord:** `httpx` multipart `multipart/form-data` with `payload_json` + `files[0]` (query params include `wait=true` and optional `thread_id`)
+4. Audit `{tool:"send_file", status:"ok", bytes, ms, message_id, [discord_webhook_id, thread_id]}`
 
 ## Operator filter
 
-Every incoming update is checked at the dispatcher layer (`update_dispatcher.from_operator`). Non-operator updates are dropped + audited as `{tool:"_polling", status:"rejected", reason:"non_operator"}`. Tool handlers never see them.
+Every incoming *Telegram* update is checked at the dispatcher layer (`update_dispatcher.from_operator`). Non-operator updates are dropped + audited as `{tool:"_polling", status:"rejected", reason:"non_operator"}`. Tool handlers never see them.
 
 This is the only line of defence against someone messaging the bot directly — Telegram bots have no built-in restriction. Keep `operator_chat_id` private and the bot's username unpublished.
+
+**Discord has no inbound updates** — it is send-only. The webhook URL is unidirectional (POST into Discord), so there is no channel to receive replies.
 
 ## Polling resilience
 
@@ -117,7 +160,7 @@ HTTP 409 gets its own path: it means another client is polling this bot token, s
 
 ## Poll ownership
 
-Telegram's `getUpdates` accepts one client per bot token. Everything else mcgram does — sends, reminders, all of ntfy — is one-way HTTP and is safe from any number of processes at once.
+Telegram's `getUpdates` accepts one client per bot token. Everything else mcgram does — sends, reminders, all of ntfy, all of Discord — is one-way HTTP and is safe from any number of processes at once.
 
 So `~/.mcgram/.lock` guards **the poll loop**, not the process. Before v0.3.0 it wrapped the whole server, and a second Claude Code session died at the MCP handshake with `-32000`.
 
@@ -126,9 +169,11 @@ So `~/.mcgram/.lock` guards **the poll loop**, not the process. Before v0.3.0 it
 - **Acquire on start.** Won → full mode. Lost → send-only degraded mode; the server still boots and serves.
 - **`ask` is gated on ownership.** The `AskRegistry` is attached to `AppState` only while this process polls. A non-owner returns `polling_not_owned` (with the owning pid) *immediately*, because the operator's reply is delivered to the polling process — waiting could only end in a `timeout` result that misreports an unanswerable question as an ignored one.
 - **Takeover.** A degraded instance re-checks every 30s (`MCGRAM_POLL_RETRY_S`), so it picks up polling when the owner exits — including `kill -9`, where the stale lock is reclaimed by PID liveness check.
-- **No lock when there's nothing to poll.** ntfy-only or `bot.disable_polling: true` instances skip the lock entirely; taking it would starve a real Telegram instance.
+- **No lock when there's nothing to poll.** ntfy-only, Discord-only, or `bot.disable_polling: true` instances skip the lock entirely; taking it would starve a real Telegram instance.
 
 Degraded mode is *not* implemented by flipping `bot.disable_polling` at runtime — that field also decides whether `channels.default` resolves to telegram or ntfy, so mutating it would silently reroute every send.
+
+Discord channels do not affect polling because Discord is one-way only. A deployment with only Discord channels and no Telegram bot will not start a poller, will not take the lock, and will not return `polling_not_owned` for `ask` calls (instead returning `transport_unsupported` because Discord has no inbound channel).
 
 ## Concurrent audit writers
 
@@ -140,8 +185,9 @@ Pure `asyncio.create_task(asyncio.sleep(delay) → send_message(⏰ text))`. Sto
 
 ## What lives outside this repo
 
-- `~/.mcgram/config.yaml` — user config
-- `~/.mcgram/.env` — bot token
+- `~/.mcgram/config.yaml` — user config (channel names, chat IDs, ntfy topics; does NOT hold credentials)
+- `~/.mcgram/.env` — bot token + Discord webhook URLs (credentials only; never version-controlled)
+  - Format: `MCGRAM_BOT_TOKEN=<token>` + `DISCORD_<CHANNEL_NAME>=<webhook_url>` (env var names are arbitrary, set via `mcgram channel add-discord`)
 - `~/.mcgram/.lock` — single-instance PID file
-- `~/.mcgram/audit.jsonl[.1..3]` — append-only audit log + rotated backups
+- `~/.mcgram/audit.jsonl[.1..3]` — append-only audit log + rotated backups (redacted if `redact_text: true`)
 - `~/.claude/skills/mcgram/SKILL.md` — companion skill, installed by `mcgram init`
