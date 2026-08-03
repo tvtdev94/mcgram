@@ -142,6 +142,68 @@ channels:
 
 
 # --------------------------------------------------------------------------- #
+# Mention registry
+# --------------------------------------------------------------------------- #
+
+
+def test_mentions_parsed_and_land_on_destination(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MCGRAM_DISCORD_WEBHOOK_EVE", WEBHOOK_EVE)
+    s = _write(
+        tmp_path / "c.yaml",
+        """
+discord:
+  mentions:
+    alice: "123456789012345678"
+    bob: 987654321098765432
+channels:
+  eve:
+    transport: discord
+    discord_webhook_env: MCGRAM_DISCORD_WEBHOOK_EVE
+""",
+    )
+    dest = s.resolve_destination("eve")
+    # numeric YAML value is coerced to string
+    assert dest.discord_mentions == {
+        "alice": "123456789012345678",
+        "bob": "987654321098765432",
+    }
+
+
+def test_mentions_non_numeric_id_rejected(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match="numeric Discord id"):
+        _write(
+            tmp_path / "c.yaml",
+            """
+discord:
+  mentions:
+    alice: not-a-number
+channels:
+  eve:
+    transport: discord
+    discord_webhook_env: X
+""",
+        )
+
+
+def test_mentions_empty_when_no_discord_section(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MCGRAM_DISCORD_WEBHOOK_EVE", WEBHOOK_EVE)
+    s = _write(
+        tmp_path / "c.yaml",
+        """
+channels:
+  eve:
+    transport: discord
+    discord_webhook_env: MCGRAM_DISCORD_WEBHOOK_EVE
+""",
+    )
+    assert s.resolve_destination("eve").discord_mentions == {}
+
+
+# --------------------------------------------------------------------------- #
 # Default-channel seeding
 # --------------------------------------------------------------------------- #
 

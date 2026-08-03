@@ -53,6 +53,29 @@ send_message(text="deploy done", channel="eve", thread_id="1532959062499659987")
 send_file(path="./out.log", channel="eve", caption="build log")
 ```
 
+#### Writing style for Discord
+
+Write like a chat message, not a report:
+
+- **Short, simple, direct.** One main point per message. Prefer 1–3 lines.
+- **Hard limit 2000 characters** (not words) — over the cap returns `text_too_long`; split into multiple messages or attach a file.
+- Skip heavy markdown, long preambles, and narration. Lead with the outcome ("✅ deploy done", "❌ 3 tests failing").
+
+#### Mentions (@ping)
+
+Ping a person with the `mention` parameter (Discord only):
+
+```python
+send_message(text="deploy done", channel="eve", mention=["alice"])
+send_file(path="./out.log", channel="eve", caption="build log", mention=["alice", "bob"])
+```
+
+- `mention` takes **registered names**, not raw IDs. The user registers them with
+  `mcgram discord mention add <name> <user_id>`.
+- An unregistered name returns `unknown_mention` with a `known` list — read it, don't retry blindly; ask the user to register the name (or pick from `known`).
+- **Don't hand-write `<@id>` in `text`.** Only registered users passed via `mention` actually ping; `@everyone`/`@here`/role mentions are always suppressed for safety.
+- `mention` on a Telegram/ntfy channel is ignored (response carries a `note`).
+
 ## `ask` needs the polling session
 
 Telegram allows one poller per bot token, so when the user has several Claude Code sessions open, only one of them receives replies. Every session can still send.
@@ -91,6 +114,8 @@ mcgram channel add oncall -1001234567890 -d "Pager"          # Telegram channel
 mcgram channel add-ntfy alerts --topic mcgram-x9k2 -d "..."  # ntfy channel (random topic if --topic omitted)
 mcgram channel add-discord eve                               # Discord channel (prompts for webhook URL)
 mcgram channel remove oncall
+mcgram discord mention add alice 123456789012345678          # register a @mention target (Discord)
+mcgram discord mention list                                  # list registered mentions
 ```
 
 **Don't:** invent channel names. Either use `default` or ask.
@@ -116,6 +141,7 @@ mcgram channel remove oncall
 - `file_too_large` → file exceeds the size cap. Compress, split, or summarize.
 - `ask` returning `source: "timeout"` → user didn't reply. Decide: retry, default, or abort.
 - `text_too_long` → text exceeds the transport cap (`max` in the response: 4096 Telegram/ntfy, 2000 Discord); split or send as a file.
+- `unknown_mention` (from `mention=[...]` on Discord) → a name isn't registered. Read the `known` list; ask the user to `mcgram discord mention add` it, or use a known name. Do **NOT** retry the same name.
 - `reminder_max_pending` → too many pending reminders. Cancel some via `cancel_reminder`.
 - `telegram_api` / `ntfy_api` / `discord_api` → transport error from the upstream service. Read the `reason` field for details (Discord maps common causes: bad webhook, wrong `thread_id`, rate limit).
 

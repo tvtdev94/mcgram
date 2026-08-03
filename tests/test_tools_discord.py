@@ -192,3 +192,127 @@ async def test_telegram_audit_record_has_no_discord_fields(
     rec = _audit(app_state.audit.path)[-1]
     assert "discord_webhook_id" not in rec
     assert "thread_id" not in rec
+
+
+# --------------------------------------------------------------------------- #
+# Mentions
+# --------------------------------------------------------------------------- #
+
+ALICE_ID = "123456789012345678"
+
+
+@pytest.fixture
+async def discord_mention_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> AsyncIterator[AppState]:
+    monkeypatch.setenv("MCGRAM_DISCORD_WEBHOOK_EVE", WEBHOOK)
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        f"""
+discord:
+  mentions:
+    alice: "{ALICE_ID}"
+channels:
+  eve:
+    transport: discord
+    discord_webhook_env: MCGRAM_DISCORD_WEBHOOK_EVE
+""",
+        encoding="utf-8",
+    )
+    settings = Settings.load(cfg)
+    async with DiscordClient() as dc:
+        yield AppState(
+            settings=settings,
+            dispatcher=UpdateDispatcher(),
+            rate=RateLimiter(100),
+            audit=AuditLog(tmp_path / "audit.jsonl"),
+            discord_client=dc,
+        )
+
+
+async def test_mention_prepends_token_and_whitelists_user(
+    discord_mention_state: AppState, httpx_mock
+) -> None:
+    httpx_mock.add_response(method="POST", json={"id": "777"})
+    out = await send_message.handle(
+        discord_mention_state, text="deploy done", channel="eve", mention=["alice"]
+    )
+    assert out["ok"] is True
+    body = json.loads(httpx_mock.get_requests()[0].content)
+    assert body["content"] == f"<@{ALICE_ID}> deploy done"
+    assert body["allowed_mentions"] == {"parse": [], "users": [ALICE_ID]}
+
+
+async def test_unknown_mention_rejected_before_network(
+    discord_mention_state: AppState, httpx_mock
+) -> None:
+    out = await send_message.handle(
+        discord_mention_state, text="hi", channel="eve", mention=["ghost"]
+    )
+    assert out["error"] == "invalid_input"
+    assert out["reason"] == "unknown_mention"
+    assert out["unknown"] == ["ghost"]
+    assert out["known"] == ["alice"]
+    assert httpx_mock.get_requests() == []  # never contacted Discord
+    rec = _audit(discord_mention_state.audit.path)[-1]
+    assert rec["reason"] == "unknown_mention"
+
+
+async def test_no_mention_still_sets_empty_allowed_mentions(
+    discord_mention_state: AppState, httpx_mock
+) -> None:
+    httpx_mock.add_response(method="POST", json={"id": "777"})
+    await send_message.handle(
+        discord_mention_state, text="hi @everyone", channel="eve"
+    )
+    body = json.loads(httpx_mock.get_requests()[0].content)
+    assert body["allowed_mentions"] == {"parse": []}
+
+
+async def test_mention_ignored_note_on_telegram(
+    app_state: AppState, httpx_mock
+) -> None:
+    httpx_mock.add_response(url=TG_SEND, json={"ok": True, "result": {"message_id": 1}})
+    out = await send_message.handle(app_state, text="hi", mention=["alice"])
+    assert out["ok"] is True
+    assert "mention ignored" in out["note"]
+
+
+async def test_mention_prefix_counts_toward_2000_cap(
+    discord_mention_state: AppState
+) -> None:
+    # 1995 chars + "<@id> " prefix (> 5) exceeds Discord's 2000-char content cap.
+    out = await send_message.handle(
+        discord_mention_state, text="x" * 1995, channel="eve", mention=["alice"]
+    )
+    assert out["error"] == "invalid_input"
+    assert out["reason"] == "text_too_long"
+    assert out["max"] == 2000
+
+
+async def test_send_file_mention_prepends_caption(
+    discord_mention_state: AppState, httpx_mock, tmp_path: Path
+) -> None:
+    discord_mention_state.settings.allow_outside_cwd = True
+    p = tmp_path / "log.txt"
+    p.write_bytes(b"data")
+    httpx_mock.add_response(method="POST", json={"id": "777"})
+    out = await send_file.handle(
+        discord_mention_state, path=str(p), channel="eve",
+        caption="build log", mention=["alice"],
+    )
+    assert out["ok"] is True
+    req = httpx_mock.get_requests()[0]
+    assert f"<@{ALICE_ID}> build log".encode() in req.content
+    assert b'"users": ["' + ALICE_ID.encode() + b'"]' in req.content
+
+
+async def test_mention_names_audited(
+    discord_mention_state: AppState, httpx_mock
+) -> None:
+    httpx_mock.add_response(method="POST", json={"id": "777"})
+    await send_message.handle(
+        discord_mention_state, text="hi", channel="eve", mention=["alice"]
+    )
+    rec = _audit(discord_mention_state.audit.path)[-1]
+    assert rec["mentions"] == ["alice"]

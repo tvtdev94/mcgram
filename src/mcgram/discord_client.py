@@ -77,11 +77,18 @@ class DiscordClient:
         username: str | None,
         avatar_url: str | None,
         silent: bool,
+        mention_user_ids: list[str] | None = None,
     ) -> dict[str, Any]:
         """Build the JSON body, omitting keys whose value is None.
 
         Discord rejects explicit `null` for `username`/`avatar_url`, so absent
         keys must be dropped rather than sent as null.
+
+        `allowed_mentions` is ALWAYS set: webhooks parse `@everyone`/`@here`/role
+        mentions from raw content by default, so an empty `parse` list is the
+        safe baseline that pings nobody. When `mention_user_ids` is provided, only
+        those specific user IDs are whitelisted (`parse: []` + explicit `users`),
+        which is why `<@id>` tokens the caller put in `content` actually ping.
         """
         payload: dict[str, Any] = {}
         if content is not None:
@@ -92,6 +99,10 @@ class DiscordClient:
             payload["avatar_url"] = avatar_url
         if silent:
             payload["flags"] = _FLAG_SUPPRESS_NOTIFICATIONS
+        if mention_user_ids:
+            payload["allowed_mentions"] = {"parse": [], "users": list(mention_user_ids)}
+        else:
+            payload["allowed_mentions"] = {"parse": []}
         return payload
 
     def _friendly_reason(
@@ -155,10 +166,17 @@ class DiscordClient:
         username: str | None = None,
         avatar_url: str | None = None,
         silent: bool = False,
+        mention_user_ids: list[str] | None = None,
     ) -> dict[str, Any]:
-        """POST a text message. Returns the created message object (has `id`)."""
+        """POST a text message. Returns the created message object (has `id`).
+
+        `content` must already contain any `<@id>` mention tokens; this method
+        only whitelists `mention_user_ids` in `allowed_mentions` so they ping.
+        """
         url = self._build_url(webhook_url, thread_id)
-        payload = self._build_payload(content, username, avatar_url, silent)
+        payload = self._build_payload(
+            content, username, avatar_url, silent, mention_user_ids
+        )
         return await self._request("POST", url, json_body=payload)
 
     async def send_file(
@@ -171,10 +189,13 @@ class DiscordClient:
         username: str | None = None,
         avatar_url: str | None = None,
         silent: bool = False,
+        mention_user_ids: list[str] | None = None,
     ) -> dict[str, Any]:
         """Upload a file as `multipart/form-data` (payload_json + files[0])."""
         url = self._build_url(webhook_url, thread_id)
-        payload = self._build_payload(content, username, avatar_url, silent)
+        payload = self._build_payload(
+            content, username, avatar_url, silent, mention_user_ids
+        )
         mime, _ = mimetypes.guess_type(path.name)
         with open(path, "rb") as f:
             body = f.read()
@@ -192,6 +213,7 @@ class DiscordClient:
         username: str | None = None,
         avatar_url: str | None = None,
         silent: bool = False,
+        mention_user_ids: list[str] | None = None,
     ) -> dict[str, Any]:
         """Same wire shape as `send_file` — Discord infers video from the file
         extension and needs no separate endpoint."""
@@ -203,6 +225,7 @@ class DiscordClient:
             username=username,
             avatar_url=avatar_url,
             silent=silent,
+            mention_user_ids=mention_user_ids,
         )
 
     async def health(self, webhook_url: str) -> dict[str, Any] | None:
@@ -220,6 +243,34 @@ class DiscordClient:
             except ValueError:
                 return None
         return None
+
+
+def resolve_mentions(
+    names: list[str], registry: dict[str, str]
+) -> tuple[list[str], list[str]]:
+    """Map registered mention names to Discord user IDs.
+
+    Returns `(ids, unknown)` where `ids` holds the resolved user IDs (in the
+    order requested, duplicates preserved) and `unknown` holds any names absent
+    from `registry`. Callers reject the whole request when `unknown` is non-empty.
+    """
+    ids: list[str] = []
+    unknown: list[str] = []
+    for name in names:
+        uid = registry.get(name)
+        if uid is None:
+            unknown.append(name)
+        else:
+            ids.append(uid)
+    return ids, unknown
+
+
+def format_mention_prefix(user_ids: list[str]) -> str:
+    """Render user IDs as a leading `<@id> ` run to prepend to message content.
+
+    Returns "" for an empty list, so callers can unconditionally concatenate.
+    """
+    return "".join(f"<@{uid}> " for uid in user_ids)
 
 
 def webhook_id_from_url(url: str) -> str | None:

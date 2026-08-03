@@ -29,9 +29,13 @@ ntfy:
 # discord:
 #   username: "mcgram"              # display name shown on Discord
 #   avatar_url:                     # optional; must be http(s) if set
+#   mentions:                       # name -> Discord user id, for @ping via mention=[...]
+#     alice: "123456789012345678"   # register with: mcgram discord mention add alice <id>
 #
 # Post into a thread: pass `thread_id` when calling the tool, not here. Webhooks
 # cannot create a new thread in a text channel — the thread must already exist.
+# @mentions only ping users listed in `mentions`; @everyone/@here/roles are
+# always suppressed for safety.
 
 defaults:
   parse_mode: plain               # plain | markdown_v2 (default plain)

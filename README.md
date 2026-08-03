@@ -111,6 +111,8 @@ ntfy.sh and Discord have no 2-way input, so `ask` returns `transport_unsupported
 
 Discord `send_message` / `send_file` / `send_video` accept an optional `thread_id` to post into an existing thread. Discord has no default channel — always name it: `send_message(text="…", channel="eve")`.
 
+They also accept an optional `mention=["alice"]` to **@ping** registered users — e.g. `send_message(text="deploy done", channel="eve", mention=["alice"])`. Names are registered with `mcgram discord mention add`. Only listed users are pinged; `@everyone`/`@here`/roles are always suppressed. Keep Discord messages short and direct — the content cap is **2000 characters**.
+
 ## Channels
 
 Route messages to different destinations across all transports:
@@ -137,6 +139,7 @@ mcgram init [--force]           # scaffold ~/.mcgram/ + skill + auto-register MC
 mcgram doctor                   # config + connectivity check (per-transport)
 mcgram audit [opts]             # analyze audit.jsonl: --since 1h, --tool ask, --rejected, --tail
 mcgram channel <action>         # list | add NAME CHAT_ID | add-ntfy NAME [--topic T] | add-discord NAME [--webhook U] | remove NAME
+mcgram discord mention <action> # list | add NAME USER_ID | remove NAME   (Discord @mention registry)
 mcgram install-skill [--force]  # reinstall ~/.claude/skills/mcgram/SKILL.md
 ```
 
@@ -165,6 +168,11 @@ limits:
   reminder_max_pending: 10
   file_max_bytes: 52428800         # 50 MB
   ask_options_max: 6
+
+discord:                           # optional — Discord display identity + @mention registry
+  username: mcgram
+  mentions:                        # name -> user id; register via `mcgram discord mention add`
+    alice: "123456789012345678"
 
 channels:                          # optional named destinations
   oncall:                          # Telegram channel

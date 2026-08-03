@@ -8,7 +8,11 @@ from pathlib import Path
 import httpx
 import pytest
 
-from mcgram.discord_client import DiscordClient
+from mcgram.discord_client import (
+    DiscordClient,
+    format_mention_prefix,
+    resolve_mentions,
+)
 from mcgram.errors import DiscordError
 
 WEBHOOK = "https://discord.com/api/webhooks/123456789/abctoken"
@@ -62,6 +66,36 @@ async def test_not_silent_omits_flags(httpx_mock) -> None:
         await c.send_message(WEBHOOK, "hi")
     body = json.loads(httpx_mock.get_requests()[0].content)
     assert "flags" not in body
+
+
+async def test_allowed_mentions_defaults_to_parse_empty(httpx_mock) -> None:
+    """Every message pings nobody by default — blocks @everyone/@here/roles."""
+    httpx_mock.add_response(method="POST", json=_msg_ok())
+    async with DiscordClient() as c:
+        await c.send_message(WEBHOOK, "hi @everyone")
+    body = json.loads(httpx_mock.get_requests()[0].content)
+    assert body["allowed_mentions"] == {"parse": []}
+
+
+async def test_allowed_mentions_whitelists_given_user_ids(httpx_mock) -> None:
+    httpx_mock.add_response(method="POST", json=_msg_ok())
+    async with DiscordClient() as c:
+        await c.send_message(WEBHOOK, "<@1> <@2> hi", mention_user_ids=["1", "2"])
+    body = json.loads(httpx_mock.get_requests()[0].content)
+    assert body["allowed_mentions"] == {"parse": [], "users": ["1", "2"]}
+
+
+def test_format_mention_prefix() -> None:
+    assert format_mention_prefix([]) == ""
+    assert format_mention_prefix(["123"]) == "<@123> "
+    assert format_mention_prefix(["1", "2"]) == "<@1> <@2> "
+
+
+def test_resolve_mentions_splits_known_and_unknown() -> None:
+    registry = {"alice": "111", "bob": "222"}
+    ids, unknown = resolve_mentions(["alice", "ghost", "bob"], registry)
+    assert ids == ["111", "222"]
+    assert unknown == ["ghost"]
 
 
 async def test_username_none_omitted_not_null(httpx_mock) -> None:

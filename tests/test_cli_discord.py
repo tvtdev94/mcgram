@@ -10,10 +10,11 @@ from pathlib import Path
 import pytest
 import yaml
 
-from mcgram import cli_channel, cli_doctor
+from mcgram import cli_channel, cli_discord, cli_doctor
 from mcgram.env_file import upsert_env_var
 
 WEBHOOK = "https://discord.com/api/webhooks/123456789/tok_secret_abc"
+ALICE_ID = "123456789012345678"
 
 
 def _cfg(tmp_path: Path, body: str = "bot:\n  operator_chat_id: 1\n") -> Path:
@@ -218,3 +219,91 @@ def test_doctor_checks_discord_no_url_leak(
     assert WEBHOOK not in out
     assert "tok_secret_abc" not in out
     assert rc == 0
+
+
+# --------------------------------------------------------------------------- #
+# discord mention add / list / remove
+# --------------------------------------------------------------------------- #
+
+
+def test_mention_add_writes_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = _cfg(tmp_path)
+    monkeypatch.setenv("MCGRAM_CONFIG", str(cfg))
+    rc = cli_discord.main(["mention", "add", "alice", ALICE_ID])
+    assert rc == 0
+    data = yaml.safe_load(cfg.read_text(encoding="utf-8"))
+    assert data["discord"]["mentions"]["alice"] == ALICE_ID
+    # unrelated config preserved
+    assert data["bot"]["operator_chat_id"] == 1
+
+
+def test_mention_add_bad_id_writes_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = _cfg(tmp_path)
+    monkeypatch.setenv("MCGRAM_CONFIG", str(cfg))
+    rc = cli_discord.main(["mention", "add", "alice", "not-a-number"])
+    assert rc == 2
+    data = yaml.safe_load(cfg.read_text(encoding="utf-8"))
+    assert "discord" not in data
+
+
+def test_mention_add_preserves_existing_mentions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = _cfg(
+        tmp_path,
+        "discord:\n  username: mcgram\n  mentions:\n"
+        f"    bob: '{ALICE_ID}'\n",
+    )
+    monkeypatch.setenv("MCGRAM_CONFIG", str(cfg))
+    cli_discord.main(["mention", "add", "alice", ALICE_ID])
+    data = yaml.safe_load(cfg.read_text(encoding="utf-8"))
+    assert data["discord"]["username"] == "mcgram"
+    assert set(data["discord"]["mentions"]) == {"alice", "bob"}
+
+
+def test_mention_list_shows_entries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cfg = _cfg(
+        tmp_path,
+        f"discord:\n  mentions:\n    alice: '{ALICE_ID}'\n",
+    )
+    monkeypatch.setenv("MCGRAM_CONFIG", str(cfg))
+    assert cli_discord.main(["mention", "list"]) == 0
+    out = capsys.readouterr().out
+    assert "alice" in out
+    assert ALICE_ID in out
+
+
+def test_mention_list_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cfg = _cfg(tmp_path)
+    monkeypatch.setenv("MCGRAM_CONFIG", str(cfg))
+    assert cli_discord.main(["mention", "list"]) == 0
+    assert "no mentions" in capsys.readouterr().out
+
+
+def test_mention_remove(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = _cfg(
+        tmp_path,
+        f"discord:\n  mentions:\n    alice: '{ALICE_ID}'\n",
+    )
+    monkeypatch.setenv("MCGRAM_CONFIG", str(cfg))
+    assert cli_discord.main(["mention", "remove", "alice"]) == 0
+    data = yaml.safe_load(cfg.read_text(encoding="utf-8"))
+    assert data["discord"]["mentions"] == {}
+
+
+def test_mention_remove_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = _cfg(tmp_path)
+    monkeypatch.setenv("MCGRAM_CONFIG", str(cfg))
+    assert cli_discord.main(["mention", "remove", "ghost"]) == 1

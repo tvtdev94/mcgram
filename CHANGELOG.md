@@ -5,6 +5,26 @@ All notable changes to mcgram will be documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- **Discord @mentions** — `send_message` / `send_file` / `send_video` accept an
+  optional `mention=["<name>"]` to ping registered users. Names resolve to
+  `<@id>` tokens prepended to the message/caption; an unregistered name returns
+  `unknown_mention` (with the `known` list) before any network call. Ignored on
+  Telegram/ntfy (response carries a `note`). The mention prefix counts toward the
+  2000-character Discord content cap.
+- `discord.mentions` config map (`name -> Discord user id`) and CLI
+  `mcgram discord mention add|list|remove` to manage it. User IDs live in
+  `config.yaml` (not secrets, unlike webhook URLs).
+
+### Changed
+- **Discord messages now always send `allowed_mentions`.** Without an explicit
+  `mention`, the baseline is `{"parse": []}` — `@everyone`/`@here`/role mentions
+  that appear in raw message text no longer ping (safety hardening). Only user
+  IDs resolved from the `mention` registry are whitelisted. Previously, raw
+  mention text in `send_message`/caption could ping; that no longer happens.
+
 ## [0.4.0] — 2026-08-01
 
 ### Added

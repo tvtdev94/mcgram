@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -53,12 +54,16 @@ class NtfyConfig(BaseModel):
 class DiscordConfig(BaseModel):
     """Global settings shared by every Discord channel.
 
-    Holds only the display identity — the webhook URLs (address + secret) live
-    per-channel in env vars, never here.
+    Holds the display identity plus the `name -> user id` mention registry —
+    the webhook URLs (address + secret) live per-channel in env vars, never here.
+    User IDs are not secrets, so the mention map is safe to keep in config.yaml.
     """
 
     username: str = "mcgram"
     avatar_url: str | None = None
+    # name -> Discord user id (numeric snowflake, as string). Populated by
+    # `mcgram discord mention add`. Used to resolve `mention=[...]` on send tools.
+    mentions: dict[str, str] = Field(default_factory=dict)
 
     @field_validator("avatar_url")
     @classmethod
@@ -66,6 +71,29 @@ class DiscordConfig(BaseModel):
         if v is not None and not v.startswith(("http://", "https://")):
             raise ValueError("discord.avatar_url must start with http:// or https://")
         return v
+
+    @field_validator("mentions", mode="before")
+    @classmethod
+    def _check_mentions(cls, v: object) -> dict[str, str]:
+        # `mode="before"` so a YAML-numeric user id (parsed as int) is coerced to
+        # str here, before pydantic's dict[str, str] value check would reject it.
+        if v is None:
+            return {}
+        if not isinstance(v, dict):
+            raise ValueError("discord.mentions must be a mapping of name -> user id")
+        out: dict[str, str] = {}
+        for name, uid in v.items():
+            key = str(name).strip()
+            if not key:
+                raise ValueError("discord.mentions: mention name must be non-empty")
+            sid = str(uid)
+            if not re.fullmatch(r"\d{15,25}", sid):
+                raise ValueError(
+                    f"discord.mentions[{key!r}]: user id must be a numeric Discord id "
+                    "(15-25 digits)"
+                )
+            out[key] = sid
+        return out
 
 
 class ChannelConfig(BaseModel):
@@ -162,6 +190,8 @@ class Destination:
     discord_webhook_url: str | None = None
     discord_username: str | None = None
     discord_avatar_url: str | None = None
+    # name -> user id registry for resolving `mention=[...]`. None for non-discord.
+    discord_mentions: dict[str, str] | None = None
 
 
 class Settings(BaseModel):
@@ -276,6 +306,7 @@ class Settings(BaseModel):
                 discord_webhook_url=url,
                 discord_username=dc.username,
                 discord_avatar_url=dc.avatar_url,
+                discord_mentions=dc.mentions,
             )
         # ntfy: backfill topic from defaults; require ntfy section configured
         if self.ntfy is None:

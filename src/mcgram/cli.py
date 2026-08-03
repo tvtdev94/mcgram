@@ -18,6 +18,8 @@ USAGE:
   mcgram channel add NAME CHAT_ID add a Telegram channel
   mcgram channel add-ntfy NAME    add a ntfy.sh channel (auto-generates topic)
   mcgram channel remove NAME      remove a channel
+  mcgram discord mention add NAME ID  register a @mention target (Discord)
+  mcgram discord mention list     list / remove registered @mention targets
   mcgram install-skill [--force]  install / reinstall ~/.claude/skills/mcgram/SKILL.md
   mcgram clear-lock               remove stale ~/.mcgram/.lock (frees Telegram polling)
   mcgram --version                print version
@@ -48,6 +50,9 @@ def main() -> None:
         if first == "channel":
             from .cli_channel import main as channel_main
             sys.exit(channel_main(args[1:]))
+        if first == "discord":
+            from .cli_discord import main as discord_main
+            sys.exit(discord_main(args[1:]))
         if first == "install-skill":
             from .skill_installer import install_skill
             force = "--force" in args[1:]
