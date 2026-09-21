@@ -22,6 +22,12 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 - Credentials can no longer reach the audit log or a tool result through an
   httpx error message: the Telegram bot token and the Discord webhook token are
   scrubbed from the error detail.
+- **A startup race could delete a live instance's poll lock.** The lock file is
+  created and the pid written as two separate syscalls; a second instance that
+  read it in between saw no pid, judged the lock stale, and unlinked it — on
+  Windows that raised an unhandled `PermissionError` and the server exited
+  during startup. The reader now waits for the pid write to land, and a refused
+  unlink is treated as proof the lock is live rather than as an error.
 
 ### Added
 - `docs/release.md` — the (manual) publish procedure.
