@@ -6,6 +6,11 @@ tests. Pushing a tag does **not** publish anything.
 
 Credentials live in `~/.pypirc` (never in the repo).
 
+**Use twine, not `uv publish`.** `uv publish` does not read `~/.pypirc` — it
+wants `UV_PUBLISH_TOKEN`, `--token`, or a keyring, and fails with "Missing
+credentials" otherwise. Pin twine to latest: the hatchling build emits metadata
+version 2.5, and twine 6.x rejects it with `InvalidDistribution`. 7.0 accepts it.
+
 ## Steps
 
 ```bash
@@ -26,8 +31,11 @@ git tag vX.Y.Z
 git push && git push --tags
 
 # 3. build + publish
-uv build                    # → dist/
-uv publish                  # reads ~/.pypirc
+#    Build into a fresh directory: `uv build` does not clear dist/, and
+#    publishing a directory that still holds older artifacts re-uploads them.
+uv build --out-dir build-out
+uvx twine@latest upload build-out/*
+rm -rf build-out
 
 # 4. GitHub release (do not skip — v0.5.0 shipped with a tag and no release)
 gh release create vX.Y.Z --title "vX.Y.Z — <headline>" --notes-from-tag
@@ -43,8 +51,8 @@ pip index versions mcgram   # or: open https://pypi.org/project/mcgram/
 - Version agrees across `pyproject.toml`, `src/mcgram/__init__.py`, and the top
   `CHANGELOG.md` section.
 - `mcgram doctor` still passes against a real config.
-- `dist/` holds only the artifacts for the version being shipped — `uv build`
-  does not clear stale files. Delete it first if unsure.
+- Build into `build-out/`, not `dist/` — `dist/` still holds artifacts from
+  earlier releases and `uv build` does not clear them.
 
 ## Notes
 
