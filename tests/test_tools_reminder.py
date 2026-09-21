@@ -8,7 +8,7 @@ from mcgram.tools import cancel_reminder, list_reminders, set_reminder
 
 
 def _wire(app_state: AppState) -> ReminderScheduler:
-    sched = ReminderScheduler(app_state.client, app_state.settings, app_state.audit)
+    sched = ReminderScheduler(app_state)
     app_state.reminders = sched
     return sched
 

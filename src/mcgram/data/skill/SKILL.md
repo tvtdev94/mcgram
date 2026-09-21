@@ -143,7 +143,8 @@ mcgram discord mention list                                  # list registered m
 - `text_too_long` → text exceeds the transport cap (`max` in the response: 4096 Telegram/ntfy, 2000 Discord); split or send as a file.
 - `unknown_mention` (from `mention=[...]` on Discord) → a name isn't registered. Read the `known` list; ask the user to `mcgram discord mention add` it, or use a known name. Do **NOT** retry the same name.
 - `reminder_max_pending` → too many pending reminders. Cancel some via `cancel_reminder`.
-- `telegram_api` / `ntfy_api` / `discord_api` → transport error from the upstream service. Read the `reason` field for details (Discord maps common causes: bad webhook, wrong `thread_id`, rate limit).
+- `telegram_api` / `ntfy_api` / `discord_api` → the service answered and refused. Read the `reason` field for details (Discord maps common causes: bad webhook, wrong `thread_id`, rate limit). Don't blind-retry — the same call usually fails the same way.
+- `transport_unreachable` → the request never reached the service (offline, DNS, timeout). **Nothing was delivered.** Unlike every other error here, one retry is reasonable — the cause is often transient. If it fails again, tell the user the notification could not be sent rather than silently carrying on; they are probably away from the machine and waiting on it.
 
 ## How `ask` resolves (Telegram only)
 

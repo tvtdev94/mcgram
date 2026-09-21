@@ -278,7 +278,7 @@ async def test_degraded_instance_can_still_set_reminders(
 
     state = _state(settings, audit_log)
     state.owns_polling = False
-    scheduler = ReminderScheduler(state.client, settings, audit_log)
+    scheduler = ReminderScheduler(state)
     out = scheduler.create("check logs", delay_s=60)
     assert out["reminder_id"].startswith("r_")
     assert len(scheduler.list()) == 1

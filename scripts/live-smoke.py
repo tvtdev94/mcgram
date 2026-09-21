@@ -38,7 +38,7 @@ async def main() -> int:
             rate=rate,
             audit=audit,
         )
-        state.reminders = ReminderScheduler(client, settings, audit)
+        state.reminders = ReminderScheduler(state)
 
         # 1. send_message
         print("→ send_message")
@@ -74,7 +74,6 @@ async def main() -> int:
         print("→ set_reminder(2s)")
         r4 = await set_reminder.handle(state, text="live-smoke reminder", delay_s=2)
         print("  result:", r4)
-        rid = r4["reminder_id"]
 
         print("→ list_reminders")
         r5 = await list_reminders.handle(state)

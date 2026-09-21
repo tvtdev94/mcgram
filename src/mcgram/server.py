@@ -225,9 +225,7 @@ def _wire_phase3(state: AppState) -> None:
         from .reminders import ReminderScheduler
     except ImportError:
         return
-    state.reminders = ReminderScheduler(
-        state.client, state.settings, state.audit, ntfy_client=state.ntfy_client,
-    )
+    state.reminders = ReminderScheduler(state)
 
 
 def _shutdown_phase3(state: AppState) -> None:

@@ -7,7 +7,7 @@ from typing import Any
 
 import httpx
 
-from .errors import AuthError, TelegramError
+from .errors import AuthError, TelegramError, TransportError
 
 _DEFAULT_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
 
@@ -51,7 +51,10 @@ class TelegramClient:
             timeout = httpx.Timeout(read_timeout, connect=10.0)
         else:
             timeout = httpx.USE_CLIENT_DEFAULT  # type: ignore[assignment]
-        resp = await self._client.post(url, data=data, files=files, timeout=timeout)
+        try:
+            resp = await self._client.post(url, data=data, files=files, timeout=timeout)
+        except httpx.HTTPError as e:
+            raise TransportError.from_httpx("telegram", e, self._token) from e
         if resp.status_code == 401:
             raise AuthError("telegram: invalid bot token (HTTP 401)")
         try:

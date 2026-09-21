@@ -18,7 +18,7 @@ from typing import Any
 
 import httpx
 
-from .errors import DiscordError
+from .errors import DiscordError, TransportError
 
 _DEFAULT_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
 
@@ -152,9 +152,16 @@ class DiscordClient:
     ) -> dict[str, Any]:
         if self._client is None:
             raise RuntimeError("DiscordClient used outside `async with` context")
-        resp = await self._client.request(
-            method, url, json=json_body, data=data, files=files
-        )
+        try:
+            resp = await self._client.request(
+                method, url, json=json_body, data=data, files=files
+            )
+        except httpx.HTTPError as e:
+            # The webhook token is the last path segment — scrub it, the error
+            # message (and the audit line built from it) must not carry it.
+            raise TransportError.from_httpx(
+                "discord", e, url.path.rsplit("/", 1)[-1]
+            ) from e
         return self._handle(resp)
 
     async def send_message(

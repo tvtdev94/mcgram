@@ -40,6 +40,38 @@ class LimitError(MCGramError):
         self.kind = kind
 
 
+class TransportError(MCGramError):
+    """An HTTP call failed before any response arrived (DNS, connect, timeout).
+
+    Distinct from `TelegramError` / `NtfyError` / `DiscordError`, which all carry
+    a real HTTP status: here the request never completed, so nothing was
+    delivered. Tools must surface this instead of letting the raw httpx error
+    escape as a generic `internal` — a notification that silently failed to send
+    is the one failure this tool cannot afford to hide.
+    """
+
+    def __init__(self, transport: str, detail: str) -> None:
+        super().__init__(f"{transport}_unreachable: {detail}")
+        self.transport = transport
+        self.detail = detail
+
+    @classmethod
+    def from_httpx(
+        cls, transport: str, exc: Exception, *secrets: str | None
+    ) -> TransportError:
+        """Build from an httpx error, scrubbing credentials out of the message.
+
+        httpx errors can embed the request URL, and both the Telegram base URL
+        (`/bot<TOKEN>/`) and a Discord webhook URL carry a credential — those
+        would otherwise land in the audit log and the tool result.
+        """
+        detail = f"{type(exc).__name__}: {exc}".strip().removesuffix(":").strip()
+        for secret in secrets:
+            if secret:
+                detail = detail.replace(secret, "***")
+        return cls(transport, detail)
+
+
 class TelegramError(MCGramError):
     """Telegram Bot API returned a non-ok response."""
 

@@ -134,13 +134,41 @@ def _is_degraded(payload: dict) -> bool:
     return payload.get("error") == "polling_not_owned"
 
 
+def _lock_owner_pid(home: Path) -> int:
+    """Real pid of the poll-lock holder, read from the lock file it wrote.
+
+    Not `Popen.pid`: on a uv-managed venv the `python.exe` we spawn is a
+    trampoline that re-execs the interpreter as a child, so the pid we get from
+    Popen is not the pid the server reports for itself.
+    """
+    return int((home / ".lock").read_text(encoding="utf-8").strip())
+
+
 def _split_owner(
     a: _McgramProcess, b: _McgramProcess
 ) -> tuple[_McgramProcess, _McgramProcess]:
     """Return (owner, degraded). Probe with timeout_s=1 — in the owner this ask
-    really posts, so a long timeout would stall the test for that long."""
-    probe = b.call_tool("ask", {"question": "probe", "timeout_s": 1})
-    return (a, b) if _is_degraded(probe) else (b, a)
+    really posts, so a long timeout would stall the test for that long.
+
+    Both instances are probed and exactly one must report `polling_not_owned`.
+    Inferring "owner" from a single non-degraded probe is not safe: the owner's
+    probe fails at the network layer (api_root is unreachable here), and any
+    other error would then be misread as ownership.
+    """
+    pa = a.call_tool("ask", {"question": "probe", "timeout_s": 1})
+    pb = b.call_tool("ask", {"question": "probe", "timeout_s": 1})
+    da, db = _is_degraded(pa), _is_degraded(pb)
+    assert da != db, (
+        f"expected exactly one degraded instance, got a={pa!r} b={pb!r}"
+    )
+    # The owner reaches the network and fails there (api_root is unreachable).
+    # That must arrive as a named transport error, never as a bare `internal`:
+    # `internal` means a raw httpx exception escaped the tool layer.
+    owner_probe = pb if da else pa
+    assert owner_probe.get("error") == "transport_unreachable", (
+        f"owner probe should report a named transport failure, got {owner_probe!r}"
+    )
+    return (b, a) if da else (a, b)
 
 
 def test_two_instances_both_complete_handshake(
@@ -178,7 +206,7 @@ def test_second_instance_ask_fails_fast_and_can_still_send(
     try:
         first.initialize()
         second.initialize()
-        owner, degraded = _split_owner(first, second)
+        _owner, degraded = _split_owner(first, second)
 
         # timeout_s=120 with a wall-clock assertion: the whole point is that a
         # degraded `ask` must NOT sit on a timeout it can never win.
@@ -190,7 +218,7 @@ def test_second_instance_ask_fails_fast_and_can_still_send(
 
         assert elapsed < 5, f"degraded ask took {elapsed:.1f}s — it waited on the timeout"
         assert out["error"] == "polling_not_owned"
-        assert out["poll_owner_pid"] == owner.proc.pid  # names the session to ask in
+        assert out["poll_owner_pid"] == _lock_owner_pid(tmp_path)  # names the session to ask in
         assert out.get("source") != "timeout"  # never misreported as ignored
 
         # send_message still runs: it reaches the (unreachable) API and reports a

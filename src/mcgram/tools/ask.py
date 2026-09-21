@@ -14,7 +14,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from ..errors import ConfigError, RateLimitError, TelegramError
+from ..errors import ConfigError, RateLimitError, TelegramError, TransportError
 from ..runtime import AppState
 
 TOOL_NAME = "ask"
@@ -121,6 +121,14 @@ async def handle(
             options=options,
             timeout_s=effective_timeout,
         )
+    except TransportError as e:
+        state.audit.write({
+            "tool": TOOL_NAME, "status": "error",
+            "reason": "transport_unreachable", "error": e.detail,
+        })
+        return {"error": "transport_unreachable", "transport": e.transport,
+                "reason": e.detail,
+                "hint": "question was NOT posted — check network connectivity"}
     except TelegramError as e:
         state.audit.write({
             "tool": TOOL_NAME, "status": "error", "error": e.description,

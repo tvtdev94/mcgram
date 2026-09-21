@@ -16,7 +16,12 @@ if TYPE_CHECKING:
     from .runtime import AppState
 
 
-def _require_client(state: AppState, dest: Destination) -> None:
+def require_client(state: AppState, dest: Destination) -> None:
+    """Raise ConfigError unless the client backing `dest.transport` is present.
+
+    Public so callers that dispatch later (the reminder scheduler) can validate
+    a destination up front instead of failing at delivery time.
+    """
     if dest.transport == "telegram" and state.client is None:
         raise ConfigError(
             f"channel {dest.name!r} uses telegram transport but no Telegram client "
@@ -49,7 +54,7 @@ async def send_text(
     `thread_id` and `mention_user_ids` are honored only by discord (per-call
     runtime targets); the other transports ignore them.
     """
-    _require_client(state, dest)
+    require_client(state, dest)
     if dest.transport == "ntfy":
         assert state.ntfy_client is not None and dest.ntfy_topic is not None
         result = await state.ntfy_client.send_message(
@@ -90,7 +95,7 @@ async def send_document(
 ) -> dict[str, Any]:
     """Dispatch a file attachment. `thread_id`/`mention_user_ids` are discord-only
     (see send_text)."""
-    _require_client(state, dest)
+    require_client(state, dest)
     if dest.transport == "ntfy":
         assert state.ntfy_client is not None and dest.ntfy_topic is not None
         result = await state.ntfy_client.send_file(
@@ -130,7 +135,7 @@ async def send_video_file(
     """Dispatch a video file (Telegram inline player or ntfy mobile inline).
 
     `thread_id`/`mention_user_ids` are discord-only (see send_text)."""
-    _require_client(state, dest)
+    require_client(state, dest)
     if dest.transport == "ntfy":
         assert state.ntfy_client is not None and dest.ntfy_topic is not None
         result = await state.ntfy_client.send_video(

@@ -12,7 +12,7 @@ from typing import Any
 
 import httpx
 
-from .errors import AuthError, NtfyError
+from .errors import AuthError, NtfyError, TransportError
 
 _DEFAULT_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
 
@@ -63,7 +63,10 @@ class NtfyClient:
         if self._client is None:
             raise RuntimeError("NtfyClient used outside `async with` context")
         merged = {**self._auth_header(), **(headers or {})}
-        resp = await self._client.request(method, url, content=content, headers=merged)
+        try:
+            resp = await self._client.request(method, url, content=content, headers=merged)
+        except httpx.HTTPError as e:
+            raise TransportError.from_httpx("ntfy", e, self._token) from e
         if resp.status_code in (401, 403):
             raise AuthError(f"ntfy: unauthorized (HTTP {resp.status_code})")
         if resp.status_code >= 400:

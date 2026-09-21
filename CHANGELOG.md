@@ -5,6 +5,27 @@ All notable changes to mcgram will be documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.5.1] — 2026-09-21
+
+### Fixed
+- **Reminders on Discord channels never fired.** `set_reminder` returned a
+  `reminder_id` for a Discord channel, then the fire path died on an internal
+  assertion — the scheduler held its own Telegram/ntfy clients and had no
+  Discord branch. Delivery now goes through the shared transport dispatch, so a
+  reminder reaches whatever transport its channel resolves to.
+- **Network failures surfaced as `internal` with no audit line.** Raw httpx
+  errors escaped the transport clients, so an unreachable Telegram/ntfy/Discord
+  endpoint produced a bare `{"error": "internal"}` and no record that the
+  message had been lost. All three transports now raise `TransportError`, and
+  `send_message` / `send_file` / `send_video` / `ask` report it as
+  `transport_unreachable` with an audit entry.
+- Credentials can no longer reach the audit log or a tool result through an
+  httpx error message: the Telegram bot token and the Discord webhook token are
+  scrubbed from the error detail.
+
+### Added
+- `docs/release.md` — the (manual) publish procedure.
+
 ## [0.5.0] — 2026-08-03
 
 ### Added

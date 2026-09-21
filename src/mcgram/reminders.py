@@ -9,13 +9,12 @@ import time
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-from .errors import ConfigError, LimitError
+from .dispatch import require_client, send_text
+from .errors import LimitError
 
 if TYPE_CHECKING:
-    from .audit import AuditLog
-    from .config import Destination, Settings
-    from .ntfy_client import NtfyClient
-    from .tg_client import TelegramClient
+    from .config import Destination
+    from .runtime import AppState
 
 log = logging.getLogger("mcgram.reminders")
 
@@ -27,21 +26,15 @@ def _iso(epoch: float) -> str:
 class ReminderScheduler:
     """Stores pending reminders as asyncio.Tasks. State lost on process exit.
 
-    Telegram-only by default; pass `ntfy_client` to route ntfy channels.
+    Delivery goes through `dispatch.send_text`, so a reminder reaches whichever
+    transport its channel resolves to — telegram, ntfy, or discord — instead of
+    the scheduler carrying its own per-transport client wiring.
     """
 
-    def __init__(
-        self,
-        client: TelegramClient | None,
-        settings: Settings,
-        audit: AuditLog,
-        *,
-        ntfy_client: NtfyClient | None = None,
-    ) -> None:
-        self._client = client
-        self._ntfy_client = ntfy_client
-        self._settings = settings
-        self._audit = audit
+    def __init__(self, state: AppState) -> None:
+        self._state = state
+        self._settings = state.settings
+        self._audit = state.audit
         self._tasks: dict[str, asyncio.Task] = {}
         self._meta: dict[str, dict[str, Any]] = {}
 
@@ -59,7 +52,7 @@ class ReminderScheduler:
             raise LimitError("reminder_max_pending")
         # Validate channel up-front so the error surfaces synchronously.
         dest = self._settings.resolve_destination(channel)
-        self._require_client_for(dest)
+        require_client(self._state, dest)
         rid = "r_" + secrets.token_hex(4)
         fires_at = time.time() + delay_s
         self._meta[rid] = {
@@ -73,28 +66,13 @@ class ReminderScheduler:
         return {"reminder_id": rid, "fires_at": _iso(fires_at),
                 "channel": dest.name, "transport": dest.transport}
 
-    def _require_client_for(self, dest: Destination) -> None:
-        if dest.transport == "telegram" and self._client is None:
-            raise ConfigError(
-                "reminder targets a telegram channel but no Telegram client is configured"
-            )
-        if dest.transport == "ntfy" and self._ntfy_client is None:
-            raise ConfigError(
-                "reminder targets an ntfy channel but no ntfy client is configured"
-            )
-
     async def _fire(
         self, rid: str, delay_s: float, text: str, dest: Destination,
     ) -> None:
         body = f"⏰ {text}"
         try:
             await asyncio.sleep(delay_s)
-            if dest.transport == "ntfy":
-                assert self._ntfy_client is not None and dest.ntfy_topic is not None
-                await self._ntfy_client.send_message(dest.ntfy_topic, body)
-            else:
-                assert self._client is not None and dest.chat_id is not None
-                await self._client.send_message(dest.chat_id, body)
+            await send_text(self._state, dest, body)
             self._audit.write({"tool": "_reminder_fire", "status": "ok",
                                "rid": rid, "transport": dest.transport})
         except asyncio.CancelledError:

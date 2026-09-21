@@ -316,3 +316,51 @@ async def test_mention_names_audited(
     )
     rec = _audit(discord_mention_state.audit.path)[-1]
     assert rec["mentions"] == ["alice"]
+
+
+# --------------------------------------------------------------------------- #
+# reminders over discord
+# --------------------------------------------------------------------------- #
+
+
+async def test_reminder_fires_on_a_discord_channel(
+    discord_state: AppState, httpx_mock
+) -> None:
+    """set_reminder returned success on discord while delivery never happened.
+
+    The scheduler carried its own telegram/ntfy clients and had no discord
+    branch, so the fire path died on an assertion after the caller had already
+    been told the reminder was scheduled.
+    """
+    import asyncio
+
+    from mcgram.reminders import ReminderScheduler
+
+    httpx_mock.add_response(method="POST", json={"id": "777"})
+    sched = ReminderScheduler(discord_state)
+    out = sched.create("check logs", delay_s=1, channel="eve")
+    assert out["transport"] == "discord"
+    for _ in range(30):
+        if httpx_mock.get_requests():
+            break
+        await asyncio.sleep(0.1)
+    req = httpx_mock.get_requests()
+    assert req, "reminder never reached the discord webhook"
+    assert b"check logs" in req[0].content
+    fired = [r for r in _audit(discord_state.audit.path) if r["tool"] == "_reminder_fire"]
+    assert fired and fired[-1]["status"] == "ok"
+    sched.shutdown()
+
+
+async def test_discord_webhook_token_never_leaks_on_network_failure(
+    discord_state: AppState, httpx_mock
+) -> None:
+    import httpx
+
+    httpx_mock.add_exception(httpx.ConnectError(f"cannot connect to {WEBHOOK}"))
+    out = await send_message.handle(discord_state, text="hi", channel="eve")
+    assert out["error"] == "transport_unreachable"
+    assert "tok_secret_abc" not in json.dumps(out)
+    assert "tok_secret_abc" not in Path(discord_state.audit.path).read_text(
+        encoding="utf-8"
+    )

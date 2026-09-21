@@ -14,7 +14,8 @@ def schema() -> dict[str, Any]:
     return {
         "name": TOOL_NAME,
         "description": (
-            "Schedule a reminder to fire after delay_s seconds to a Telegram channel. "
+            "Schedule a reminder to fire after delay_s seconds on any configured "
+            "channel (Telegram, ntfy.sh, or Discord). "
             "Reminder is lost on process exit (in-memory scheduler). "
             "Returns {reminder_id, fires_at, channel}."
         ),

@@ -7,7 +7,14 @@ from typing import Any
 
 from ..discord_client import format_mention_prefix, webhook_id_from_url
 from ..dispatch import send_text
-from ..errors import ConfigError, DiscordError, NtfyError, RateLimitError, TelegramError
+from ..errors import (
+    ConfigError,
+    DiscordError,
+    NtfyError,
+    RateLimitError,
+    TelegramError,
+    TransportError,
+)
 from ..runtime import AppState
 from ._mentions import resolve_for_dest
 
@@ -111,6 +118,16 @@ async def handle(state: AppState, *, text: str, channel: str | None = None,
             thread_id=thread_id,
             mention_user_ids=mention_ids or None,
         )
+    except TransportError as e:
+        state.audit.write({
+            "tool": TOOL_NAME, "status": "error",
+            "transport": dest.transport, "channel": dest.name,
+            "text_len": len(text),
+            "reason": "transport_unreachable", "error": e.detail,
+        })
+        return {"error": "transport_unreachable", "transport": dest.transport,
+                "reason": e.detail,
+                "hint": "message was NOT delivered — check network connectivity"}
     except (TelegramError, NtfyError, DiscordError) as e:
         state.audit.write({
             "tool": TOOL_NAME, "status": "error",
