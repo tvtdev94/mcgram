@@ -10,7 +10,7 @@
 [![PyPI](https://img.shields.io/pypi/v/mcgram.svg)](https://pypi.org/project/mcgram/)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/tvtdev94/mcgram/blob/main/LICENSE)
-[![Tests](https://img.shields.io/badge/tests-361%20passing-brightgreen.svg)](#)
+[![Tests](https://img.shields.io/badge/tests-366%20passing-brightgreen.svg)](#)
 [![Coverage](https://img.shields.io/badge/coverage-85%25-brightgreen.svg)](#)
 
 <img src="https://raw.githubusercontent.com/tvtdev94/mcgram/main/docs/images/hero.png" alt="mcgram hero" width="720" />

@@ -7,6 +7,8 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.2] — 2026-10-30
+
 ### Fixed
 - **Telegram showed large portrait videos squashed.** Telegram only reads the
   size of a bot-uploaded video up to about 10 MB, and `send_video` sent none, so
