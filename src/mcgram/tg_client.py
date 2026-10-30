@@ -115,8 +115,12 @@ class TelegramClient:
         caption: str | None = None,
         disable_notification: bool = False,
         supports_streaming: bool = True,
+        meta: dict[str, int] | None = None,
     ) -> dict[str, Any]:
         """Send a video with in-chat playback (thumbnail + scrubber).
+
+        `meta` holds `width`, `height` and `duration` (see `video_meta`); Telegram
+        does not read them itself from uploads over about 10 MB.
 
         For non-video files use `send_document` instead — Telegram rejects
         unrecognized formats on `sendVideo`.
@@ -125,6 +129,7 @@ class TelegramClient:
             "chat_id": chat_id,
             "disable_notification": disable_notification,
             "supports_streaming": supports_streaming,
+            **(meta or {}),
         }
         if caption:
             data["caption"] = caption

@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 
 from .config import Destination
 from .errors import ConfigError
+from .video_meta import probe_video
 
 if TYPE_CHECKING:
     from .runtime import AppState
@@ -158,5 +159,6 @@ async def send_video_file(
     assert state.client is not None and dest.chat_id is not None
     msg = await state.client.send_video(
         dest.chat_id, path, caption=caption, disable_notification=silent,
+        meta=await probe_video(path),
     )
     return {"message_id": msg.get("message_id")}

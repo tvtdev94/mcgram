@@ -109,6 +109,8 @@ Declare both `ntfy:` and `bot:` in config — each named channel picks its own t
 
 ntfy.sh and Discord have no 2-way input, so `ask` returns `transport_unsupported` on those channels — and `polling_not_owned` in a Telegram session that isn't the one polling ([why](#multiple-claude-code-sessions)). The companion [Claude Code skill](https://github.com/tvtdev94/mcgram/blob/main/src/mcgram/data/skill/SKILL.md) (installed by `mcgram init`) teaches Claude when to call which tool — both **English** and **Vietnamese** trigger phrases are recognized.
 
+On Telegram, `send_video` reads the video's width, height and duration with `ffprobe` (from ffmpeg) when it is installed and sends them along. Telegram does not size uploads over about 10 MB itself, so without ffprobe a large portrait video shows squashed.
+
 Discord `send_message` / `send_file` / `send_video` accept an optional `thread_id` to post into an existing thread. Discord has no default channel — always name it: `send_message(text="…", channel="eve")`.
 
 They also accept an optional `mention=["alice"]` to **@ping** registered users — e.g. `send_message(text="deploy done", channel="eve", mention=["alice"])`. Names are registered with `mcgram discord mention add`. Only listed users are pinged; `@everyone`/`@here`/roles are always suppressed. Keep Discord messages short and direct — the content cap is **2000 characters**.

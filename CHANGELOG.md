@@ -5,6 +5,15 @@ All notable changes to mcgram will be documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+- **Telegram showed large portrait videos squashed.** Telegram only reads the
+  size of a bot-uploaded video up to about 10 MB, and `send_video` sent none, so
+  a 9:16 clip over that size played in a wrongly shaped bubble. `send_video` now
+  reads width, height and duration with `ffprobe` when it is installed and
+  passes them to `sendVideo`; without ffprobe it sends as before.
+
 ## [0.5.1] — 2026-09-21
 
 ### Fixed
