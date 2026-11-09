@@ -124,3 +124,68 @@ def test_lock_path_default(tmp_path: Path) -> None:
     )
     s = Settings.load(cfg)
     assert s.lock_path == tmp_path / ".lock"
+
+
+def test_broker_defaults_to_disabled(tmp_path: Path) -> None:
+    cfg = tmp_path / "config.yaml"
+    _write_yaml(cfg, "bot:\n  operator_chat_id: 1\n")
+    s = Settings.load(cfg)
+    assert s.broker.enabled is False
+    assert s.broker.spool_dir is None
+    assert s.broker.poll_interval_s == 0.3
+    assert s.broker.heartbeat_stale_s == 90
+
+
+def test_broker_overrides(tmp_path: Path) -> None:
+    cfg = tmp_path / "config.yaml"
+    _write_yaml(
+        cfg,
+        "bot:\n  operator_chat_id: 1\nbroker:\n  enabled: true\n  poll_interval_s: 1.0\n",
+    )
+    s = Settings.load(cfg)
+    assert s.broker.enabled is True
+    assert s.broker.poll_interval_s == 1.0
+
+
+def test_broker_rejects_out_of_range_poll_interval(tmp_path: Path) -> None:
+    cfg = tmp_path / "config.yaml"
+    _write_yaml(cfg, "bot:\n  operator_chat_id: 1\nbroker:\n  poll_interval_s: 0\n")
+    with pytest.raises(ConfigError):
+        Settings.load(cfg)
+
+
+def test_spool_dir_does_not_follow_audit_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`audit.path` is config-controlled; letting it steer the spool would allow
+    a world-writable spool (e.g. /tmp) and turn answer forgery into a
+    machine-wide capability rather than a same-uid one.
+
+    HOME is redirected so the assertion proves the anchor tracks the user's home
+    rather than restating the constant the implementation uses."""
+    fake_home = tmp_path / "fakehome"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setenv("USERPROFILE", str(fake_home))
+
+    cfg = tmp_path / "config.yaml"
+    audit_path = str(tmp_path / "elsewhere" / "audit.jsonl").replace("\\", "/")
+    _write_yaml(
+        cfg,
+        f"bot:\n  operator_chat_id: 1\naudit:\n  path: {audit_path}\n",
+    )
+    s = Settings.load(cfg)
+    assert s.home_dir == tmp_path / "elsewhere"
+    assert s.spool_root == fake_home / ".mcgram" / "spool"
+    assert (tmp_path / "elsewhere") not in s.spool_root.parents
+
+
+def test_spool_dir_explicit_override(tmp_path: Path) -> None:
+    cfg = tmp_path / "config.yaml"
+    spool = str(tmp_path / "myspool").replace("\\", "/")
+    _write_yaml(
+        cfg,
+        f"bot:\n  operator_chat_id: 1\nbroker:\n  spool_dir: {spool}\n",
+    )
+    s = Settings.load(cfg)
+    assert s.spool_root == tmp_path / "myspool"

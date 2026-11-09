@@ -165,6 +165,26 @@ class AuditConfig(BaseModel):
         return v
 
 
+class BrokerConfig(BaseModel):
+    """Cross-process broker for `ask` and `reminders`. DEFAULT OFF.
+
+    Enabling it lowers the trust boundary of `ask` from "inbound Telegram update
+    from the operator" to "any code running as this uid can write a spool file".
+    Read docs/security-threat-model.md first.
+    """
+
+    enabled: bool = False
+    spool_dir: str | None = None  # None → Settings.spool_root
+    poll_interval_s: float = Field(0.3, gt=0, le=5)
+    request_ttl_pad_s: int = Field(30, ge=0)
+    answer_ttl_s: int = Field(300, ge=1)
+    cancel_ttl_s: int = Field(300, ge=1)
+    # Must exceed the 25s long-poll plus slack, or a healthy owner looks dead.
+    heartbeat_stale_s: int = Field(90, ge=1)
+    sweep_interval_s: int = Field(60, ge=1)
+    tmp_grace_s: int = Field(300, ge=1)
+
+
 DEFAULT_CHANNEL = "default"
 
 
@@ -201,6 +221,7 @@ class Settings(BaseModel):
     defaults: DefaultsConfig = Field(default_factory=DefaultsConfig)
     limits: LimitsConfig = Field(default_factory=LimitsConfig)
     audit: AuditConfig = Field(default_factory=AuditConfig)
+    broker: BrokerConfig = Field(default_factory=BrokerConfig)
     channels: dict[str, ChannelConfig] = Field(default_factory=dict)
     allow_outside_cwd: bool = False
     api_root: str = "https://api.telegram.org"
@@ -369,6 +390,18 @@ class Settings(BaseModel):
     @property
     def lock_path(self) -> Path:
         return self.home_dir / ".lock"
+
+    @property
+    def spool_root(self) -> Path:
+        """Broker spool root, anchored to DEFAULT_HOME — deliberately NOT `home_dir`.
+
+        `home_dir` follows `audit.path`, which the config controls outright, so
+        `audit.path: /tmp/...` would put the spool somewhere world-writable and
+        turn answer forgery from a same-uid capability into a machine-wide one.
+        """
+        if self.broker.spool_dir:
+            return Path(self.broker.spool_dir).expanduser()
+        return Path(DEFAULT_HOME).expanduser() / "spool"
 
     @classmethod
     def load(cls, path: str | Path | None = None) -> Settings:
