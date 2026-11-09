@@ -17,6 +17,7 @@ from mcp.types import TextContent, Tool
 
 from . import __version__
 from .audit import AuditLog
+from .broker_wiring import start_ask_broker
 from .config import Settings
 from .discord_client import DiscordClient
 from .errors import ConfigError, MCGramError
@@ -121,10 +122,12 @@ async def _run() -> None:
             discord_client=discord_client,
         )
         _wire_phase3(state)
+        broker_task = start_ask_broker(state)
         ownership, poll_task = _start_polling(state, settings)
         try:
             await _serve(state)
         finally:
+            await cancel_task(broker_task)
             await cancel_task(poll_task)
             if ownership is not None:
                 ownership.release()
