@@ -167,6 +167,38 @@ async def test_owner_side_failure_is_reported_as_an_error_not_a_timeout(
     assert "source" not in out
 
 
+async def test_owner_shutdown_mid_ask_fails_fast_and_retires_the_question(
+    tmp_path: Path,
+) -> None:
+    """Shutdown stops the broker, then releases the poll lock (server._run).
+    The requester must hear `cancelled` at once instead of waiting out its
+    timeout and reporting that the operator ignored the question, and the
+    question must not keep offering buttons nobody will ever read."""
+    settings = _settings(tmp_path)
+    _hold_lock(settings)
+    requester, owner = _state(settings), _state(settings)
+    await cancel_task(start_ask_broker(requester))
+    owner.ask_registry = AskRegistry()
+    serving = asyncio.create_task(
+        serve_while_owner(owner, Spool(settings.spool_root, ASK_NAMESPACE)))
+    assert await _until(lambda: requester.ask_broker.owner_alive()[0])
+    asking = asyncio.create_task(
+        ask.handle(requester, question="Deploy?", options=["Yes"], timeout_s=30))
+    assert await _until(lambda: bool(owner.client.sent))
+
+    t0 = time.monotonic()
+    await cancel_task(serving)
+    settings.lock_path.unlink()
+    out = await asyncio.wait_for(asking, timeout=5)
+
+    assert time.monotonic() - t0 < 2
+    assert out["error"] == "cancelled"
+    assert "stopped" in out["reason"]
+    posted = owner.client.sent[0]["message_id"]
+    assert {(e["kind"], e["message_id"]) for e in owner.client.edited} == {
+        ("text", posted), ("markup", posted)}
+
+
 # --- fail fast: never post, never wait --------------------------------------
 
 

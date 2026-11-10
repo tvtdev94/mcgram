@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import secrets
 import time
@@ -18,6 +19,8 @@ log = logging.getLogger("mcgram.ask")
 CHECK = "✅ "
 #: callback_data suffix of the multi-select "Done" button (never a digit).
 DONE = "done"
+#: Upper bound on the chat edits made for a question abandoned at shutdown.
+_ABANDON_EDIT_TIMEOUT_S = 5.0
 
 
 @dataclass
@@ -107,14 +110,18 @@ class AskRegistry:
         )
         try:
             value, source = await asyncio.wait_for(fut, timeout=timeout_s)
-            await _mark_answered(client, chat_id, msg["message_id"], question, value, source)
-            return {"value": value, "source": source, "question_id": q_id}
         except TimeoutError:
             await _mark_timed_out(client, chat_id, msg["message_id"], question)
             return {"value": [] if multi_select else "", "source": "timeout",
                     "question_id": q_id}
+        except asyncio.CancelledError:
+            # Shutdown: nobody will read a tap on this question any more.
+            await _mark_abandoned(client, chat_id, msg["message_id"], question)
+            raise
         finally:
             self._pending.pop(q_id, None)
+        await _mark_answered(client, chat_id, msg["message_id"], question, value, source)
+        return {"value": value, "source": source, "question_id": q_id}
 
     async def handle_update(self, update: dict[str, Any]) -> None:
         if cq := update.get("callback_query"):
@@ -215,9 +222,12 @@ async def _mark_answered(
     await _strip_keyboard(client, chat_id, message_id)
 
 
-async def _strip_keyboard(client: TelegramClient, chat_id: int, message_id: int) -> None:
+async def _strip_keyboard(
+    client: TelegramClient, chat_id: int, message_id: int, *, retry_flood_wait: bool = True
+) -> None:
     try:
-        await client.edit_message_reply_markup(chat_id, message_id, reply_markup=None)
+        await client.edit_message_reply_markup(chat_id, message_id, reply_markup=None,
+                                               retry_flood_wait=retry_flood_wait)
     except Exception:
         log.debug("edit_message_reply_markup failed (non-fatal)", exc_info=True)
 
@@ -231,3 +241,25 @@ async def _mark_timed_out(
     except Exception:
         log.debug("edit_message_text on timeout failed (non-fatal)", exc_info=True)
     await _strip_keyboard(client, chat_id, message_id)
+
+
+async def _mark_abandoned(
+    client: TelegramClient, chat_id: int, message_id: int, question: str
+) -> None:
+    """Say the question is dead and drop its buttons, on the way out.
+
+    Runs while the process shuts down, so it is bounded and never sleeps out a
+    flood wait: a stuck edit must not hold up the exit.
+    """
+    async def retire() -> None:
+        with contextlib.suppress(Exception):
+            await client.edit_message_text(
+                chat_id, message_id, f"{question}\n\n⏹ mcgram stopped before an answer",
+                retry_flood_wait=False,
+            )
+        await _strip_keyboard(client, chat_id, message_id, retry_flood_wait=False)
+
+    try:
+        await asyncio.wait_for(retire(), timeout=_ABANDON_EDIT_TIMEOUT_S)
+    except TimeoutError:
+        log.debug("retiring an abandoned question timed out (non-fatal)")

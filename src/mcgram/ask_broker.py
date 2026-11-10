@@ -120,15 +120,16 @@ class AskBroker:
         then unlink it — silently swallowing what the operator actually typed.
         """
         deadline = time.monotonic() + timeout_s
+        holders: set[int] = set()
         while True:
-            answer = self._read_trusted_answer(q_id)
+            answer = self._read_trusted_answer(q_id, holders)
             if answer is not None:
                 return answer
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break
             await asyncio.sleep(min(self._poll_interval_s, remaining))
-        return self._read_trusted_answer(q_id)
+        return self._read_trusted_answer(q_id, holders)
 
     def close_request(self, q_id: str) -> None:
         """Drop the request and its answer. Safe to call twice.
@@ -141,28 +142,44 @@ class AskBroker:
         """
         self._spool.remove(q_id, "request", "answer")
 
-    def _read_trusted_answer(self, q_id: str) -> dict[str, Any] | None:
+    def _read_trusted_answer(
+        self, q_id: str, holders: set[int] | None = None
+    ) -> dict[str, Any] | None:
+        """The answer, if trusted. `holders` collects every poll-lock holder
+        seen during one wait; the current holder is added on each call."""
+        holders = set() if holders is None else holders
+        holder = _read_pid(self._lock_path)
+        if holder is not None:
+            holders.add(holder)
         answer = self._spool.read(q_id, "answer")
         if answer is None:
             return None
-        return answer if self._answer_trusted(answer) else None
+        return answer if self._answer_trusted(answer, holders, holder) else None
 
-    def _answer_trusted(self, answer: dict[str, Any]) -> bool:
-        """The answer must come from the process currently holding the poll lock.
+    def _answer_trusted(
+        self, answer: dict[str, Any], holders: set[int], holder: int | None
+    ) -> bool:
+        """The answer must come from a process that held the poll lock while
+        this side was waiting.
 
         This does not stop a determined attacker running as the same uid — they
         can read the lock file too. What it does is raise forgery from "write one
         file" to "win the poll lock", and leave the mismatch in the log.
 
-        A rejected answer is treated as no answer: if ownership genuinely just
-        moved, the request is still in the spool and the new owner will serve it.
+        Any holder seen during the wait counts, not only the current one: an
+        owner that shuts down writes its `cancelled` answer while it still holds
+        the lock and releases the lock right after, usually before this side
+        polls again.
+
+        A rejected answer is treated as no answer. Nobody serves the request a
+        second time — the owner's `taken` claim stays until it expires — so
+        unless a trusted answer turns up, the caller waits out its timeout.
         """
         claimed = answer.get("answered_by_pid")
         if claimed is None:
             log.warning("broker answer has no answered_by_pid — rejecting")
             return False
-        holder = _read_pid(self._lock_path)
-        if holder is None or claimed != holder:
+        if claimed not in holders:
             log.warning(
                 "broker answer claims pid=%s but the poll lock is held by pid=%s — "
                 "rejecting (forged answer, or ownership just moved)",

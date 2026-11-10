@@ -58,7 +58,7 @@ class AskServer:
         self._heartbeat_stale_s = heartbeat_stale_s
         self._tmp_grace_s = tmp_grace_s
         self._sweep_interval_s = sweep_interval_s
-        self._serving: set[str] = set()
+        self._serving: dict[str, asyncio.Task] = {}
         self._last_sweep = 0.0
 
     async def run(self) -> None:
@@ -68,17 +68,32 @@ class AskServer:
         hold up the others, and any error in a tick is logged rather than
         allowed to kill the loop: a dead watcher looks exactly like "no owner"
         to every other session.
+
+        Cancelling `run` also cancels and awaits every request in flight, so
+        each one writes its `cancelled` answer before this returns — that is,
+        before shutdown or demotion releases the poll lock. Nobody else serves
+        a claimed request, so without that answer the requester would wait out
+        its full timeout and then report that the operator ignored it.
         """
-        while True:
-            try:
-                self.write_heartbeat()
-                self._scan_once()
-                self._maybe_sweep()
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                log.exception("ask_server tick failed")
-            await asyncio.sleep(self._poll_interval_s)
+        try:
+            while True:
+                try:
+                    self.write_heartbeat()
+                    self._scan_once()
+                    self._maybe_sweep()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    log.exception("ask_server tick failed")
+                await asyncio.sleep(self._poll_interval_s)
+        finally:
+            await self._stop_serving()
+
+    async def _stop_serving(self) -> None:
+        tasks = list(self._serving.values())
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
     def write_heartbeat(self) -> bool:
         """Publish liveness so non-owners can fail fast instead of blocking."""
@@ -116,9 +131,9 @@ class AskServer:
                 {"owner_pid": os.getpid(), "at": now, "expires_at": req["expires_at"]},
             ):
                 continue
-            self._serving.add(key)
             task = asyncio.create_task(self._serve_one(key, req), name=f"mcgram-ask-{key}")
-            task.add_done_callback(lambda t, k=key: self._serving.discard(k))
+            self._serving[key] = task
+            task.add_done_callback(lambda t, k=key: self._serving.pop(k, None))
 
     def _maybe_sweep(self) -> None:
         now = time.time()
@@ -154,7 +169,8 @@ class AskServer:
             )
             self._write_answer(key, result["value"], result["source"])
         except asyncio.CancelledError:
-            self._write_answer(key, "", "cancelled")
+            self._write_answer(key, "", "cancelled",
+                               detail="the polling session stopped before the operator answered")
             raise
         except TelegramError as e:
             self._write_answer(key, "", "telegram_error", detail=e.description)

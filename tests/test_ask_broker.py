@@ -235,6 +235,22 @@ async def test_answer_rejected_when_lock_file_is_missing(tmp_path: Path) -> None
     assert await broker.wait_for_answer(Q, timeout_s=0.1) is None
 
 
+async def test_answer_from_an_owner_that_released_the_lock_is_trusted(tmp_path: Path) -> None:
+    """A shutting-down owner writes `cancelled` while it holds the lock and
+    releases the lock straight after — before the requester's next poll."""
+    broker, spool, lock_path = _make(tmp_path, poll_interval_s=0.02)
+
+    async def owner_shuts_down() -> None:
+        await asyncio.sleep(0.05)  # the requester has seen the lock held by now
+        _answer(spool, value="", pid=os.getpid(), source="cancelled")
+        lock_path.unlink()  # no await in between: the requester cannot look
+
+    task = asyncio.create_task(owner_shuts_down())
+    got = await broker.wait_for_answer(Q, timeout_s=1)
+    await task
+    assert got is not None and got["source"] == "cancelled"
+
+
 async def test_answer_accepted_once_ownership_settles(tmp_path: Path) -> None:
     """A rejected answer is not a permanent verdict: the request stays in the
     spool, so a genuine new owner can still serve it."""
