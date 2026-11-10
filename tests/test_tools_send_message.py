@@ -83,6 +83,9 @@ async def test_text_over_file_cap_rejected_without_network(
     assert out["error"] == "invalid_input"
     assert out["reason"] == "text_too_long"
     assert out["max_bytes"] == 4500
+    # `max` (the message cap in characters) predates `max_bytes`; callers that
+    # read it must keep working.
+    assert out["max"] == 4096
     assert httpx_mock.get_requests() == []
 
 

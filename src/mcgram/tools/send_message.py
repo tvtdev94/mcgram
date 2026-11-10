@@ -127,7 +127,8 @@ async def handle(state: AppState, *, text: str, channel: str | None = None,
                            "reason": "text_too_long", "channel": dest.name,
                            "bytes": text_bytes})
         return {"error": "invalid_input", "reason": "text_too_long",
-                "bytes": text_bytes, "max_bytes": max_bytes, "transport": dest.transport}
+                "max": max_text, "bytes": text_bytes, "max_bytes": max_bytes,
+                "transport": dest.transport}
     if not state.rate.try_acquire(TOOL_NAME):
         state.audit.write({"tool": TOOL_NAME, "status": "rejected", "reason": "rate_limit"})
         raise RateLimitError(TOOL_NAME)
