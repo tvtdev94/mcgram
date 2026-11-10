@@ -32,8 +32,11 @@ class ReminderScheduler:
     """Pending reminders as asyncio.Tasks, mirrored to disk when `store` is set.
 
     Delivery goes through `dispatch.send_text` (telegram, ntfy, or discord).
-    `reminder_max_pending` counts this process only: a cross-session cap would
-    refuse a reminder here because some other session is busy.
+    `reminder_max_pending` counts the reminders this process created only: a
+    cross-session cap would refuse a reminder here because some other session
+    is busy, and so would counting the ones adopted from a session that exited.
+    Adoption has its own bound of `reminder_max_pending`, so a process holds at
+    most twice that many.
     """
 
     def __init__(self, state: AppState, store: ReminderSpool | None = None) -> None:
@@ -42,6 +45,8 @@ class ReminderScheduler:
         self._audit = state.audit
         self._tasks: dict[str, asyncio.Task] = {}
         self._meta: dict[str, dict[str, Any]] = {}
+        # Pending reminders taken over from another session (subset of _tasks).
+        self._adopted: set[str] = set()
         self.store = store
         self._watch_task: asyncio.Task | None = None
         # Finished reminders whose record could not be deleted yet; retried
@@ -58,7 +63,7 @@ class ReminderScheduler:
             raise LimitError("reminder_delay_must_be_positive")
         if delay_s > limits.reminder_max_delay_s:
             raise LimitError("reminder_max_delay_s")
-        if len(self._tasks) >= limits.reminder_max_pending:
+        if len(self._tasks) - len(self._adopted) >= limits.reminder_max_pending:
             raise LimitError("reminder_max_pending")
         # Validate channel up-front so the error surfaces synchronously.
         dest = self._settings.resolve_destination(channel)
@@ -74,7 +79,8 @@ class ReminderScheduler:
                 "channel": dest.name, "transport": dest.transport}
 
     def _schedule(
-        self, rid: str, text: str, fires_at: float, dest: Destination, *, late: bool = False
+        self, rid: str, text: str, fires_at: float, dest: Destination, *,
+        late: bool = False, adopted: bool = False,
     ) -> None:
         body = f"⏰ {text}"
         if late:
@@ -82,6 +88,8 @@ class ReminderScheduler:
                      "scheduled it stopped before it fired)")
         self._meta[rid] = {"text": text, "fires_at": fires_at,
                            "channel": dest.name, "transport": dest.transport}
+        if adopted:
+            self._adopted.add(rid)
         self._tasks[rid] = asyncio.create_task(
             self._fire(rid, fires_at, body, dest),
             name=f"mcgram-reminder-{rid}",
@@ -111,18 +119,23 @@ class ReminderScheduler:
                 "rid": rid, "transport": dest.transport, "error": str(e),
             })
         finally:
-            self._tasks.pop(rid, None)
-            self._meta.pop(rid, None)
+            self._forget(rid)
         self._finish(rid, fires_at)
 
     def cancel(self, rid: str) -> bool:
-        task = self._tasks.pop(rid, None)
+        task = self._tasks.get(rid)
         if task is None:
             return False
         task.cancel()
-        meta = self._meta.pop(rid, None)
+        meta = self._forget(rid)
         self._finish(rid, meta["fires_at"] if meta else time.time())
         return True
+
+    def _forget(self, rid: str) -> dict[str, Any] | None:
+        """Drop a reminder from memory; returns its metadata."""
+        self._tasks.pop(rid, None)
+        self._adopted.discard(rid)
+        return self._meta.pop(rid, None)
 
     def _finish(self, rid: str, fires_at: float) -> None:
         if self.store is not None and not self.store.finish(rid, fires_at):
@@ -151,8 +164,7 @@ class ReminderScheduler:
             self._watch_task = None
         for rid, task in list(self._tasks.items()):
             task.cancel()
-            self._tasks.pop(rid, None)
-            self._meta.pop(rid, None)
+            self._forget(rid)
 
     async def _watch(self) -> None:
         """Heartbeat and cancels every tick, adoption and sweep on slower cadences.
@@ -190,7 +202,7 @@ class ReminderScheduler:
         assert self.store is not None
         limits, now = self._settings.limits, time.time()
         for rec in self.store.orphans():
-            if len(self._tasks) >= limits.reminder_max_pending:
+            if len(self._adopted) >= limits.reminder_max_pending:
                 return
             if (rec["rid"] in self._tasks
                     or len(rec["text"]) > limits.reminder_text_max_chars
@@ -200,7 +212,8 @@ class ReminderScheduler:
             if dest is None or self.store.claim(rec) is None:
                 continue
             late = rec["fires_at"] <= now
-            self._schedule(rec["rid"], rec["text"], rec["fires_at"], dest, late=late)
+            self._schedule(rec["rid"], rec["text"], rec["fires_at"], dest,
+                           late=late, adopted=True)
             self._audit.write({"tool": "_reminder_adopt", "status": "ok", "rid": rec["rid"],
                                "from_pid": rec["pid"], "late": late})
 

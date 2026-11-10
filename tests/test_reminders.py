@@ -240,6 +240,24 @@ async def test_restart_respects_the_pending_cap(tmp_path: Path) -> None:
     assert len(_on_disk(s)) == 5  # the rest wait on disk for capacity
 
 
+async def test_adopted_reminders_do_not_use_up_this_sessions_own_cap(tmp_path: Path) -> None:
+    s = _settings(tmp_path)  # max_pending = 3
+    later = time.time() + 50
+    publish_from_dead_process(s.spool_root, *((f"r_0000c00{i}", later) for i in range(3)))
+    sched = _scheduler(s, FakeClient(), durable=True)
+    sched.start()
+    try:
+        assert await _until(lambda: len(sched.list()) == 3)
+        for text in ("a", "b", "c"):
+            sched.create(text, delay_s=50)
+        with pytest.raises(LimitError) as exc:
+            sched.create("d", delay_s=50)
+        assert exc.value.kind == "reminder_max_pending"
+        assert len(sched.list()) == 6
+    finally:
+        sched.shutdown()
+
+
 async def test_cancel_request_from_another_session_is_honoured(tmp_path: Path) -> None:
     s = _settings(tmp_path)
     s.broker.enabled = True
