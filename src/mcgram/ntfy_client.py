@@ -6,6 +6,7 @@ Mirrors the TelegramClient shape so tools can branch by transport.
 
 from __future__ import annotations
 
+import base64
 import mimetypes
 from pathlib import Path
 from typing import Any
@@ -89,12 +90,12 @@ class NtfyClient:
         `silent` (which maps to priority 1, ntfy's `min`)."""
         headers: dict[str, str] = {}
         if title:
-            headers["Title"] = _ascii_header(title)
+            headers["Title"] = _text_header(title)
         eff_priority = priority if priority is not None else (1 if silent else None)
         if eff_priority is not None:
             headers["Priority"] = str(eff_priority)
         if tags:
-            headers["Tags"] = _ascii_header(",".join(tags))
+            headers["Tags"] = _text_header(",".join(tags))
         return headers
 
     async def send_message(
@@ -176,7 +177,7 @@ class NtfyClient:
         if mime:
             headers["Content-Type"] = mime
         if caption:
-            headers["Message"] = _ascii_header(caption)
+            headers["Message"] = _text_header(caption)
         with open(path, "rb") as f:
             body = f.read()
         return await self._request(
@@ -195,13 +196,25 @@ class NtfyClient:
         return resp.status_code == 200
 
 
-def _ascii_header(value: str) -> str:
-    """ntfy HTTP headers must be latin-1 safe; collapse non-ASCII to '?'.
+def _flat(value: str) -> str:
+    """Line breaks become spaces: a header value cannot carry CR/LF, and httpx
+    refuses to send one that does (a multi-line caption would otherwise fail)."""
+    return " ".join(value.splitlines())
 
-    Line breaks become spaces: a header value cannot carry CR/LF, and httpx
-    refuses to send one that does (a multi-line caption would otherwise fail).
-    Use RFC 2047 in callers if they need to send non-ASCII titles/captions.
-    For now, this guard prevents httpx encoding errors on emoji etc.
+
+def _text_header(value: str) -> str:
+    """Header value for user text (Title, Tags, Message), UTF-8 preserved.
+
+    httpx only sends ASCII-safe header values, so non-ASCII text goes out as
+    one RFC 2047 base64 encoded word, which ntfy decodes in any header
+    (https://docs.ntfy.sh/publish/ — "Message title" and "Tags & emojis").
     """
-    flat = " ".join(value.splitlines())
-    return flat.encode("ascii", "replace").decode("ascii")
+    flat = _flat(value)
+    if flat.isascii():
+        return flat
+    return "=?UTF-8?B?" + base64.b64encode(flat.encode("utf-8")).decode("ascii") + "?="
+
+
+def _ascii_header(value: str) -> str:
+    """Single-line ASCII header value; non-ASCII collapses to '?'."""
+    return _flat(value).encode("ascii", "replace").decode("ascii")

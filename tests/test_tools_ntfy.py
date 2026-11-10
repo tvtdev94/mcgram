@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from email.header import decode_header, make_header
 from pathlib import Path
 from typing import Any
 
@@ -276,7 +277,8 @@ async def test_long_text_on_ntfy_goes_as_attachment_with_one_line_caption(
     req = httpx_mock.get_requests()[0]
     assert req.headers.get("Filename") == "message.txt"
     assert req.headers.get("Priority") == "5"
-    assert req.headers.get("Message").startswith("header line zzz")
+    caption = str(make_header(decode_header(req.headers["Message"])))
+    assert caption.startswith("header line zzz")
     assert req.content == text.encode("utf-8")
 
 
