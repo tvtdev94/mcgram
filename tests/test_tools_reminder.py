@@ -7,8 +7,10 @@ import time
 from mcgram.broker_wiring import build_reminder_store
 from mcgram.reminders import ReminderScheduler
 from mcgram.runtime import AppState
+from mcgram.spool import Spool
 from mcgram.tools import cancel_reminder, list_reminders, set_reminder
 from tests.test_reminder_spool import publish_from_dead_process
+from tests.test_reminders import _until
 
 
 def _wire(app_state: AppState) -> ReminderScheduler:
@@ -66,15 +68,31 @@ async def test_broker_lists_reminders_of_other_sessions(app_state: AppState) -> 
     sched.shutdown()
 
 
-async def test_without_broker_list_shows_only_this_session_unchanged(app_state: AppState) -> None:
+async def test_without_broker_cancel_reaches_another_sessions_reminder_for_good(
+    app_state: AppState, httpx_mock
+) -> None:
+    """Saved reminders do not need the broker, so neither does cancelling one.
+    Nobody may act on the cancel for hours — its owner died and no session
+    adopted it yet — and it must still hold when one finally does."""
     sched = _wire_durable(app_state, broker=False)
-    publish_from_dead_process(app_state.settings.spool_root, ("r_0000c002", time.time() + 60))
-    await set_reminder.handle(app_state, text="mine", delay_s=60)
-    [item] = (await list_reminders.handle(app_state))["reminders"]
-    assert set(item) == {"id", "text", "fires_at", "channel", "transport"}
-    out = await cancel_reminder.handle(app_state, reminder_id="r_0000c002")
-    assert out == {"ok": False}  # no cross-session cancel without the broker
-    sched.shutdown()
+    rid = "r_0000c002"
+    publish_from_dead_process(app_state.settings.spool_root, (rid, time.time() - 1))
+
+    async def listed() -> set[str]:
+        return {r["id"] for r in (await list_reminders.handle(app_state))["reminders"]}
+
+    assert rid in await listed()
+    out = await cancel_reminder.handle(app_state, reminder_id=rid)
+    assert out["ok"] is True
+    assert rid not in await listed()
+    spool = Spool(app_state.settings.spool_root, "reminders")
+    spool.sweep(now=time.time() + 3600)  # an hour on, any session sweeps
+    sched.start()  # adopts orphans at once
+    try:
+        assert await _until(lambda: spool.keys("rec") == set())
+    finally:
+        sched.shutdown()
+    assert httpx_mock.get_requests() == []  # dropped, never sent
 
 
 async def test_broker_cancel_of_another_sessions_reminder_is_a_request(
@@ -83,7 +101,7 @@ async def test_broker_cancel_of_another_sessions_reminder_is_a_request(
     sched = _wire_durable(app_state, broker=True)
     publish_from_dead_process(app_state.settings.spool_root, ("r_0000c003", time.time() + 60))
     out = await cancel_reminder.handle(app_state, reminder_id="r_0000c003")
-    assert out["ok"] is True and out["via"] == "broker"
+    assert out["ok"] is True and out["via"] == "spool"
     assert "pid=" in out["note"]
     # Unknown ids and path-like ids still report plain {"ok": False}.
     for bad in ("r_0000ffff", "../r_0000c003", "C:evil"):

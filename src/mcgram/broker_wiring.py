@@ -53,6 +53,7 @@ def build_reminder_store(settings: Settings) -> ReminderSpool | None:
                     "be lost on restart.", settings.spool_root, reason)
         return None
     return ReminderSpool(spool, cancel_ttl_s=settings.broker.cancel_ttl_s,
+                         heartbeat_stale_s=settings.broker.heartbeat_stale_s,
                          tmp_grace_s=settings.broker.tmp_grace_s)
 
 

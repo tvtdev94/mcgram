@@ -30,10 +30,10 @@ async def handle(state: AppState, *, reminder_id: str) -> dict[str, Any]:
         return {"ok": True}
     owner_pid = _request_remote_cancel(state, reminder_id)
     if owner_pid is not None:
-        state.audit.write({"tool": TOOL_NAME, "status": "requested", "via": "broker",
+        state.audit.write({"tool": TOOL_NAME, "status": "requested", "via": "spool",
                            "rid": reminder_id, "owner_pid": owner_pid})
         # Honest wording: this is a request, and the owner may fire it first.
-        return {"ok": True, "via": "broker",
+        return {"ok": True, "via": "spool",
                 "note": f"cancel request sent to the session that owns this reminder "
                         f"(pid={owner_pid}); it still fires if it is already due"}
     state.audit.write({"tool": TOOL_NAME, "status": "not_found", "rid": reminder_id})
@@ -41,9 +41,13 @@ async def handle(state: AppState, *, reminder_id: str) -> dict[str, Any]:
 
 
 def _request_remote_cancel(state: AppState, reminder_id: str) -> int | None:
-    """Owner pid when a cancel request was delivered to another session."""
+    """Owner pid when a cancel request was delivered to another session.
+
+    Works whether or not the broker is on: saved reminders do not need it, and
+    a reminder this session cannot cancel would otherwise still fire.
+    """
     store = state.reminders.store if state.reminders is not None else None
-    if not state.settings.broker.enabled or store is None:
+    if store is None:
         return None
     if not isinstance(reminder_id, str) or not valid_key(reminder_id):
         return None

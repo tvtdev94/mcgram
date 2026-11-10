@@ -267,7 +267,7 @@ async def test_watch_loop_survives_a_failing_tick(
     s.broker.poll_interval_s = 0.02
     sched = _scheduler(s, FakeClient(), durable=True)
     assert sched.store is not None
-    real = sched.store.take_cancel_requests
+    real = sched.store.finished
     calls = {"n": 0}
 
     def flaky(rids: list[str]) -> list[str]:
@@ -276,7 +276,7 @@ async def test_watch_loop_survives_a_failing_tick(
             raise OSError("disk hiccup")
         return real(rids)
 
-    monkeypatch.setattr(sched.store, "take_cancel_requests", flaky)
+    monkeypatch.setattr(sched.store, "finished", flaky)
     sched.start()
     try:
         rid = sched.create("stop me", delay_s=50)["reminder_id"]
@@ -285,3 +285,40 @@ async def test_watch_loop_survives_a_failing_tick(
     finally:
         sched.shutdown()
     assert calls["n"] > 1
+
+
+async def test_fired_reminder_whose_record_survives_is_never_fired_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On Windows a concurrent reader makes the record's unlink fail (WinError
+    32), so the record outlives the reminder. Another session that later takes
+    it for an orphan must not send it again; the owner keeps retrying the
+    delete instead."""
+    s = _settings(tmp_path)
+    s.broker.enabled, s.broker.poll_interval_s = True, 0.02  # fast watcher ticks
+    publish_from_dead_process(s.spool_root, ("r_0000d001", time.time() - 1))
+    real_unlink = Path.unlink
+    busy = {"rec": True}
+
+    def unlink(self: Path, missing_ok: bool = False) -> None:
+        if busy["rec"] and self.name.endswith(".rec.json"):
+            raise PermissionError(32, "being used by another process", str(self))
+        real_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+    client = FakeClient()
+    owner = _scheduler(s, client, durable=True)
+    other = _scheduler(s, client, durable=True)
+    assert other.store is not None
+    other.store._instance = "0123456789abcdef"  # a different session's token
+    owner.start()
+    try:
+        assert await _until(lambda: len(client.sent) == 1)
+        assert _on_disk(s) == {"r_0000d001"}  # the delete really failed
+        other.start()
+        assert not await _until(lambda: len(client.sent) > 1, timeout=0.3)
+        busy["rec"] = False
+        assert await _until(lambda: _on_disk(s) == set())
+    finally:
+        other.shutdown()
+        owner.shutdown()

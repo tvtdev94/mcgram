@@ -48,13 +48,13 @@ def _publish(store: ReminderSpool, rid: str, fires_at: float | None = None) -> N
                          channel="default", transport="telegram")
 
 
-def test_own_record_is_listed_alive_and_retract_removes_it(tmp_path: Path) -> None:
+def test_own_record_is_listed_alive_and_finish_removes_it(tmp_path: Path) -> None:
     store = _store(tmp_path)
     _publish(store, "r_0000aaaa")
     [rec] = store.list_all()
     assert (rec["rid"], rec["owner_alive"], rec["pid"]) == ("r_0000aaaa", True, os.getpid())
     assert store.orphans() == []
-    store.retract("r_0000aaaa")
+    assert store.finish("r_0000aaaa", rec["fires_at"]) is True
     assert store.list_all() == []
 
 
@@ -78,25 +78,23 @@ def test_only_one_of_two_racing_adopters_wins_an_orphan(tmp_path: Path) -> None:
     assert rec is not None and rec["pid"] == os.getpid()
 
 
-def test_orphan_with_a_pending_cancel_is_dropped_not_adopted(tmp_path: Path) -> None:
+def test_orphan_cancelled_after_it_was_seen_is_dropped_not_adopted(tmp_path: Path) -> None:
     publish_from_dead_process(tmp_path, ("r_0000dddd", time.time() + 60))
     store = _store(tmp_path)
-    assert store.request_cancel("r_0000dddd") is not None
     [orphan] = store.orphans()
+    assert store.request_cancel("r_0000dddd") is not None
     assert store.claim(orphan) is None
     assert store.list_all() == []
-    assert Spool(tmp_path, "reminders").keys("cancel") == set()
+    assert Spool(tmp_path, "reminders").keys("rec") == set()
 
 
-def test_cancel_requests_are_taken_once_and_only_for_the_given_ids(tmp_path: Path) -> None:
+def test_cancel_marks_only_that_reminder_and_only_once(tmp_path: Path) -> None:
     store = _store(tmp_path)
     _publish(store, "r_0000eeee")
     _publish(store, "r_0000ffff")
     assert store.request_cancel("r_0000eeee") == os.getpid()
-    assert store.request_cancel("r_0000ffff") == os.getpid()
-    assert store.take_cancel_requests(["r_0000eeee"]) == ["r_0000eeee"]
-    assert store.take_cancel_requests(["r_0000eeee"]) == []
-    assert Spool(tmp_path, "reminders").keys("cancel") == {"r_0000ffff"}
+    assert store.finished(["r_0000eeee", "r_0000ffff"]) == ["r_0000eeee"]
+    assert store.request_cancel("r_0000eeee") is None  # already cancelled
 
 
 def test_cancel_request_for_an_unknown_reminder_writes_nothing(tmp_path: Path) -> None:
@@ -125,3 +123,19 @@ def test_tampered_records_are_never_listed_or_adopted(tmp_path: Path, tamper: di
     spool.write("r_0000abcd", "rec", {**rec, "pid": 2**22 + 7, **tamper})
     assert store.list_all() == []
     assert store.orphans() == []
+
+
+@pytest.mark.parametrize("beating", [True, False], ids=["heartbeat-fresh", "heartbeat-gone"])
+def test_owner_is_judged_by_its_heartbeat_not_only_its_pid(tmp_path: Path, beating: bool) -> None:
+    """Windows reuses pids: a dead owner's pid can belong to an unrelated live
+    process, and its reminders would then never fire. A silent owner is only
+    taken for dead on a second look, so one stalled tick (or waking from
+    sleep) does not hand a live session's reminders away."""
+    stranger = _store(tmp_path)
+    stranger._pid, stranger._instance = os.getppid(), "feedfacecafebeef"  # alive, not us
+    _publish(stranger, "r_0000f00d")
+    if not beating:
+        Spool(tmp_path, "reminders").sweep(now=time.time() + 600)  # its heartbeat expired
+    store = _store(tmp_path)
+    assert store.orphans() == []
+    assert [o["rid"] for o in store.orphans()] == ([] if beating else ["r_0000f00d"])

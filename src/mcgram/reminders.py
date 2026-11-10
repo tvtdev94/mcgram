@@ -44,6 +44,9 @@ class ReminderScheduler:
         self._meta: dict[str, dict[str, Any]] = {}
         self.store = store
         self._watch_task: asyncio.Task | None = None
+        # Finished reminders whose record could not be deleted yet; retried
+        # every watcher tick (their tombstone already stops a second fire).
+        self._unremoved: set[str] = set()
 
     def create(self, text: str, delay_s: int, channel: str | None = None) -> dict[str, Any]:
         limits = self._settings.limits
@@ -80,13 +83,19 @@ class ReminderScheduler:
         self._meta[rid] = {"text": text, "fires_at": fires_at,
                            "channel": dest.name, "transport": dest.transport}
         self._tasks[rid] = asyncio.create_task(
-            self._fire(rid, max(0.0, fires_at - time.time()), body, dest),
+            self._fire(rid, fires_at, body, dest),
             name=f"mcgram-reminder-{rid}",
         )
 
-    async def _fire(self, rid: str, delay_s: float, body: str, dest: Destination) -> None:
+    async def _fire(self, rid: str, fires_at: float, body: str, dest: Destination) -> None:
         try:
-            await asyncio.sleep(delay_s)
+            await asyncio.sleep(max(0.0, fires_at - time.time()))
+            if self.store is not None and not self.store.still_mine(rid):
+                # Cancelled from another session since the last watcher tick,
+                # or adopted away while this process looked dead.
+                self._audit.write({"tool": "_reminder_fire", "status": "skipped",
+                                   "rid": rid, "reason": "cancelled_or_adopted"})
+                return
             await send_text(self._state, dest, body)
             self._audit.write({"tool": "_reminder_fire", "status": "ok",
                                "rid": rid, "transport": dest.transport})
@@ -104,18 +113,20 @@ class ReminderScheduler:
         finally:
             self._tasks.pop(rid, None)
             self._meta.pop(rid, None)
-        if self.store is not None:
-            self.store.retract(rid)
+        self._finish(rid, fires_at)
 
     def cancel(self, rid: str) -> bool:
         task = self._tasks.pop(rid, None)
         if task is None:
             return False
         task.cancel()
-        self._meta.pop(rid, None)
-        if self.store is not None:
-            self.store.retract(rid)
+        meta = self._meta.pop(rid, None)
+        self._finish(rid, meta["fires_at"] if meta else time.time())
         return True
+
+    def _finish(self, rid: str, fires_at: float) -> None:
+        if self.store is not None and not self.store.finish(rid, fires_at):
+            self._unremoved.add(rid)
 
     def list(self) -> list[dict[str, Any]]:
         return [
@@ -144,7 +155,7 @@ class ReminderScheduler:
             self._meta.pop(rid, None)
 
     async def _watch(self) -> None:
-        """Cancel mailbox every tick, adoption and sweep on slower cadences.
+        """Heartbeat and cancels every tick, adoption and sweep on slower cadences.
 
         Every step is synchronous, so cancellation can only land on the sleep —
         never between reading a cancel request and acting on it.
@@ -155,10 +166,14 @@ class ReminderScheduler:
         next_adopt = next_sweep = 0.0
         while True:
             try:
-                for rid in self.store.take_cancel_requests(list(self._tasks)):
+                self.store.beat()
+                for rid in list(self._unremoved):
+                    if self.store.remove_record(rid):
+                        self._unremoved.discard(rid)
+                for rid in self.store.finished(list(self._tasks)):
                     if self.cancel(rid):
                         self._audit.write({"tool": "cancel_reminder", "status": "ok",
-                                           "rid": rid, "via": "broker"})
+                                           "rid": rid, "via": "spool"})
                 now = time.monotonic()
                 if now >= next_adopt:
                     next_adopt = now + ADOPT_INTERVAL_S

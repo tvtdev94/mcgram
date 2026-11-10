@@ -16,8 +16,9 @@ def schema() -> dict[str, Any]:
         "name": TOOL_NAME,
         "description": (
             "List pending reminders. Returns [{id, text, fires_at, channel, transport}]. "
-            "With the broker enabled, reminders set in other sessions are included and "
-            "every entry adds {local, owner_pid, owner_alive}."
+            "When reminders are saved to disk (the default), reminders set in other "
+            "sessions are included too and every entry adds {local, owner_pid, "
+            "owner_alive}; cancel_reminder reaches all of them."
         ),
         "inputSchema": {"type": "object", "properties": {}},
     }
@@ -28,7 +29,7 @@ async def handle(state: AppState) -> dict[str, Any]:
         return {"error": "internal", "reason": "reminders_not_initialized"}
     items = state.reminders.list()
     store = state.reminders.store
-    if not state.settings.broker.enabled or store is None:
+    if store is None:
         return {"reminders": items}
     for item in items:
         item.update(local=True, owner_pid=os.getpid(), owner_alive=True)
