@@ -10,7 +10,7 @@
 [![PyPI](https://img.shields.io/pypi/v/mcgram.svg)](https://pypi.org/project/mcgram/)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/tvtdev94/mcgram/blob/main/LICENSE)
-[![Tests](https://img.shields.io/badge/tests-366%20passing-brightgreen.svg)](#)
+[![Tests](https://img.shields.io/badge/tests-582%20passing-brightgreen.svg)](#)
 [![Coverage](https://img.shields.io/badge/coverage-85%25-brightgreen.svg)](#)
 
 <img src="https://raw.githubusercontent.com/tvtdev94/mcgram/main/docs/images/hero.png" alt="mcgram hero" width="720" />
@@ -309,15 +309,15 @@ Full module map, lifecycle diagram, and data flow: [docs/architecture.md](https:
 
 ```
 src/mcgram/
-├── cli.py · cli_init · cli_doctor · cli_audit · cli_channel · skill_installer
+├── cli.py · cli_init · cli_doctor · cli_audit · cli_channel · cli_test_send · skill_installer
 ├── config · errors · audit · lock · rate_limiter
 ├── tg_client · ntfy_client · dispatch · update_dispatcher · polling · server · runtime
 ├── poll_ownership · ask_registry · reminders
 ├── spool · spool_safety · ask_broker · ask_server · ask_via_broker · broker_wiring · reminder_spool
-└── tools/  send_message · send_file · send_video · ask · set_reminder · cancel_reminder · list_reminders
+└── tools/  send_message · edit_message · send_file · send_video · ask · set_reminder · cancel_reminder · list_reminders
 ```
 
-Small focused modules (most <200 LOC, largest ~400), 361 tests, ruff clean, py3.11/3.12 × ubuntu/windows in CI.
+Small focused modules (most <200 LOC, largest ~400), 582 tests, ruff clean, py3.11/3.12 × ubuntu/windows in CI.
 
 ## Update / uninstall
 
