@@ -289,7 +289,7 @@ Rarely what you want.
 ## Known limitations
 
 - **Reminders survive restarts** — pending reminders are saved in
-  `~/.mcgram/spool/reminders/`. When the session that set one stops, the next
+  `~/.mcgram/spool/<config-id>/reminders/` (one directory per config file). When the session that set one stops, the next
   running (or restarted) mcgram takes it over, and one that came due in the
   meantime fires right away, marked late. A reminder more than 24h overdue is
   dropped. Only a crash in the instant between sending and recording it as

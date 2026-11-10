@@ -93,12 +93,12 @@ operator's answer. See [Broker spool](#broker-spool).
 
 ## Broker spool
 
-`~/.mcgram/spool/` holds two namespaces:
+`~/.mcgram/spool/<config-id>/` holds two namespaces, where `<config-id>` is the first 16 hex of the SHA-256 of the resolved config file path. Records name a channel, not a config, so each config gets its own directory; otherwise a session on one config would adopt another config's reminders and trust its broker heartbeat:
 
 - `reminders/` is always on. It holds pending reminders so they survive a restart.
 - `asks/` exists only with `broker.enabled: true`, which is off by default.
 
-Dirs are 0700 and files 0600 on POSIX. At boot, `spool_safety.probe_dir` refuses a spool root or namespace dir that is a symlink, owned by another uid, or wider than 0700 (on Windows the user-profile ACLs carry this instead). Keys are validated against `[a-z]_[0-9a-f]{8,32}`, so ids like `../x`, `a/b` or `C:evil` never reach the filesystem. Every record has an `expires_at` and is swept, including orphans left by killed processes.
+Dirs are 0700 and files 0600 on POSIX. At boot, `spool_safety.probe_dir` refuses any directory from `~/.mcgram/spool` down to the namespace dir that is a symlink, owned by another uid, or wider than 0700 (on Windows the user-profile ACLs carry this instead). Keys are validated against `[a-z]_[0-9a-f]{8,32}`, so ids like `../x`, `a/b` or `C:evil` never reach the filesystem. Every record has an `expires_at` and is swept, including orphans left by killed processes.
 
 | STRIDE | Threat | Mitigation |
 |---|---|---|

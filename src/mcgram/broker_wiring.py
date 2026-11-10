@@ -23,6 +23,7 @@ from .ask_server import AskServer
 from .poll_ownership import cancel_task
 from .reminder_spool import ReminderSpool
 from .spool import Spool
+from .spool_safety import probe_dir
 
 if TYPE_CHECKING:
     from .config import Settings
@@ -35,9 +36,13 @@ REMINDER_NAMESPACE = "reminders"
 
 
 def safe_spool(settings: Settings, namespace: str) -> tuple[Spool | None, str]:
-    """(spool, reason) — the spool only when its directory passes the safety probe."""
+    """(spool, reason) — the spool only when its directory passes the safety probe.
+
+    The probe starts at the shared spool base, not at this config's directory:
+    whoever can write the base can swap the per-config directory beneath it.
+    """
     spool = Spool(settings.spool_root, namespace)
-    ok, reason = spool.probe()
+    ok, reason = probe_dir(settings.spool_base, spool.dir)
     return (spool, "") if ok else (None, reason)
 
 
