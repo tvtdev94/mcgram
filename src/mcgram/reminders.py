@@ -31,9 +31,7 @@ def _iso(epoch: float) -> str:
 class ReminderScheduler:
     """Pending reminders as asyncio.Tasks, mirrored to disk when `store` is set.
 
-    Delivery goes through `dispatch.send_text`, so a reminder reaches whichever
-    transport its channel resolves to — telegram, ntfy, or discord.
-
+    Delivery goes through `dispatch.send_text` (telegram, ntfy, or discord).
     `reminder_max_pending` counts this process only: a cross-session cap would
     refuse a reminder here because some other session is busy.
     """
@@ -192,9 +190,7 @@ class ReminderScheduler:
                                "from_pid": rec["pid"], "late": late})
 
     def _deliverable(self, channel: str) -> Destination | None:
-        """The destination, if THIS instance can deliver to it. Instances may
-        run different configs, so an orphan we cannot deliver is left for one
-        that can rather than dropped."""
+        """Destination if THIS instance can deliver; else leave it for one that can."""
         try:
             dest = self._settings.resolve_destination(channel)
             require_client(self._state, dest)

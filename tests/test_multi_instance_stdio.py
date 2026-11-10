@@ -6,7 +6,13 @@ completing `initialize` on both. Everything below speaks real JSON-RPC over real
 pipes — no mocks of the server itself.
 
 `api_root` points at a closed local port so the poll loop fails fast offline
-instead of reaching api.telegram.org.
+instead of reaching api.telegram.org. The broker tests instead point it at
+`_TelegramStub`, an `http.server` in a thread: stdlib only, no new test
+dependency, and only the owner ever calls it — a non-owner never talks to
+Telegram — so five endpoints cover the whole flow.
+
+The module-level `timeout(120)` overrides CI's `--timeout=30`; these tests
+start real interpreters and rely on that headroom.
 """
 
 from __future__ import annotations
@@ -15,32 +21,96 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Any
+from urllib.parse import parse_qs
 
 import pytest
 
 pytestmark = pytest.mark.timeout(120)
 
 _UNREACHABLE = "http://127.0.0.1:9"  # discard port — refuses instantly
+_OPERATOR = 12345
 
 
-def _write_config(home: Path) -> Path:
+def _write_config(home: Path, *, api_root: str = _UNREACHABLE, broker: bool = False) -> Path:
     cfg = home / "config.yaml"
     cfg.write_text(
         f"""
 bot:
   token_env: MCGRAM_BOT_TOKEN
-  operator_chat_id: 12345
+  operator_chat_id: {_OPERATOR}
 audit:
   path: {(home / 'audit.jsonl').as_posix()}
 broker:
+  enabled: {str(broker).lower()}
   spool_dir: {(home / 'spool').as_posix()}
-api_root: {_UNREACHABLE}
+  poll_interval_s: 0.05
+api_root: {api_root}
 """,
         encoding="utf-8",
     )
     return cfg
+
+
+class _TelegramStub:
+    """Just enough Bot API for the owner: getUpdates, sendMessage, the two
+    edits, answerCallbackQuery. Tests inject updates with `push`."""
+
+    def __init__(self) -> None:
+        self.sent: list[dict[str, Any]] = []
+        self._updates: list[dict[str, Any]] = []
+        self._cond = threading.Condition()
+        stub = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:  # noqa: N802 — http.server API
+                length = int(self.headers.get("Content-Length") or 0)
+                form = {k: v[0] for k, v in
+                        parse_qs(self.rfile.read(length).decode("utf-8")).items()}
+                body = json.dumps({"ok": True, "result": stub.handle(
+                    self.path.rsplit("/", 1)[-1], form)}).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args: Any) -> None:
+                pass
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.url = f"http://127.0.0.1:{self._server.server_address[1]}"
+        threading.Thread(target=self._server.serve_forever, daemon=True).start()
+
+    def handle(self, method: str, form: dict[str, str]) -> Any:
+        if method == "getUpdates":
+            offset = int(form.get("offset", 0))
+            with self._cond:
+                # Short hold instead of the real 25s so shutdown stays quick.
+                self._cond.wait_for(lambda: any(u["update_id"] >= offset
+                                                for u in self._updates), timeout=1.0)
+                return [u for u in self._updates if u["update_id"] >= offset]
+        if method == "sendMessage":
+            with self._cond:
+                msg = {"message_id": 500 + len(self.sent), "text": form["text"],
+                       "chat": {"id": int(form["chat_id"])},
+                       "reply_markup": json.loads(form.get("reply_markup", "null"))}
+                self.sent.append(msg)
+                return msg
+        return True
+
+    def push(self, update: dict[str, Any]) -> None:
+        with self._cond:
+            self._updates.append({"update_id": len(self._updates) + 1, **update})
+            self._cond.notify_all()
+
+    def close(self) -> None:
+        self._server.shutdown()
+        self._server.server_close()
 
 
 class _McgramProcess:
@@ -51,7 +121,10 @@ class _McgramProcess:
     child mid-write — which looks exactly like a server hang.
     """
 
-    def __init__(self, config: Path, repo_root: Path, log_dir: Path, tag: str) -> None:
+    def __init__(
+        self, config: Path, repo_root: Path, log_dir: Path, tag: str,
+        extra_env: dict[str, str] | None = None,
+    ) -> None:
         env = {
             **os.environ,
             "MCGRAM_CONFIG": str(config),
@@ -62,6 +135,7 @@ class _McgramProcess:
             # Re-check the poll lock fast so takeover is testable in seconds
             # rather than the 30s production cadence.
             "MCGRAM_POLL_RETRY_S": "0.5",
+            **(extra_env or {}),
         }
         self.stderr_path = log_dir / f"{tag}.stderr.log"
         self._stderr = self.stderr_path.open("w", encoding="utf-8")
@@ -133,7 +207,7 @@ def repo_root() -> Path:
 
 
 def _is_degraded(payload: dict) -> bool:
-    return payload.get("error") == "polling_not_owned"
+    return payload.get("error") in {"polling_not_owned", "broker_unavailable"}
 
 
 def _lock_owner_pid(home: Path) -> int:
@@ -279,3 +353,90 @@ def test_ownership_transfers_when_owner_exits(tmp_path: Path, repo_root: Path) -
     finally:
         second.close()
         first.close()
+
+
+# --- broker: the non-polling session asks through the polling one -----------
+
+
+def _wait(predicate: Any, what: str, timeout: float = 30.0) -> None:
+    """Wait on produced state, never on a fixed sleep."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        time.sleep(0.05)
+    pytest.fail(f"timed out waiting for {what}")
+
+
+@pytest.fixture
+def stub() -> Any:
+    s = _TelegramStub()
+    yield s
+    s.close()
+
+
+def _start_owner_then_requester(
+    tmp_path: Path, repo_root: Path, stub: _TelegramStub
+) -> tuple[_McgramProcess, _McgramProcess]:
+    """Owner first; requester only after the owner's heartbeat is up. The
+    requester never retries the lock during the test, so it stays a
+    non-owner even after the owner dies."""
+    cfg = _write_config(tmp_path, api_root=stub.url, broker=True)
+    owner = _McgramProcess(cfg, repo_root, tmp_path, "owner")
+    owner.initialize()
+    _wait(lambda: (tmp_path / "spool" / "asks" / "u0.heartbeat.json").exists(),
+          "the owner's broker heartbeat")
+    requester = _McgramProcess(cfg, repo_root, tmp_path, "requester",
+                               extra_env={"MCGRAM_POLL_RETRY_S": "600"})
+    requester.initialize()
+    return owner, requester
+
+
+def test_non_polling_session_asks_through_the_broker(
+    tmp_path: Path, repo_root: Path, stub: _TelegramStub
+) -> None:
+    owner, requester = _start_owner_then_requester(tmp_path, repo_root, stub)
+    try:
+        result: dict[str, Any] = {}
+        call = threading.Thread(target=lambda: result.update(requester.call_tool(
+            "ask", {"question": "Ship it?", "options": ["Yes", "No"], "timeout_s": 30})))
+        call.start()
+        _wait(lambda: bool(stub.sent), "the owner to post the brokered question")
+        [posted] = stub.sent
+        assert posted["text"] == "Ship it?"
+        tap = posted["reply_markup"]["inline_keyboard"][1][0]["callback_data"]
+        stub.push({"callback_query": {"id": "cb1", "data": tap, "message": {
+            "message_id": posted["message_id"], "chat": {"id": _OPERATOR}}}})
+        call.join(timeout=30)
+        assert not call.is_alive()
+        assert (result.get("value"), result.get("source"), result.get("via")) == \
+            ("No", "button", "broker"), result
+        assert len(stub.sent) == 1  # posted once, by the owner only
+    finally:
+        requester.close()
+        owner.close()
+
+
+def test_requester_fails_fast_without_posting_when_the_owner_dies(
+    tmp_path: Path, repo_root: Path, stub: _TelegramStub
+) -> None:
+    owner, requester = _start_owner_then_requester(tmp_path, repo_root, stub)
+    try:
+        owner.proc.kill()  # no cleanup runs: the heartbeat file stays behind
+        owner.proc.wait(timeout=10)
+        _wait(lambda: not _lock_holder_alive(tmp_path), "the owner process to exit")
+        t0 = time.monotonic()
+        out = requester.call_tool("ask", {"question": "deploy?", "timeout_s": 120})
+        assert time.monotonic() - t0 < 5
+        assert out["error"] == "polling_not_owned"
+        assert "no longer running" in out["broker"]
+        assert stub.sent == []
+    finally:
+        requester.close()
+        owner.close()
+
+
+def _lock_holder_alive(home: Path) -> bool:
+    from mcgram.lock import _pid_alive
+
+    return _pid_alive(_lock_owner_pid(home))
