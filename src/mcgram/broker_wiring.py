@@ -96,8 +96,11 @@ async def serve_while_owner(state: AppState, spool: Spool) -> None:
                 await _stop(server_task, spool)
                 server_task, registry = None, current
                 if registry is not None and state.client is not None:
+                    bot = state.settings.bot
                     server = AskServer(
                         spool, registry, state.client, state.rate, state.audit,
+                        operator_chat_id=bot.operator_chat_id if bot is not None else None,
+                        limits=state.settings.limits,
                         poll_interval_s=cfg.poll_interval_s,
                         answer_ttl_s=cfg.answer_ttl_s,
                         heartbeat_stale_s=cfg.heartbeat_stale_s,

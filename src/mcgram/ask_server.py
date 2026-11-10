@@ -24,12 +24,16 @@ from .spool import Spool
 
 if TYPE_CHECKING:
     from .ask_registry import AskRegistry
+    from .config import LimitsConfig
     from .rate_limiter import RateLimiter
     from .tg_client import TelegramClient
 
 log = logging.getLogger("mcgram.ask_server")
 
 TOOL_NAME = "ask"
+#: Telegram's sendMessage/editMessageText cap. A chosen label is echoed into
+#: the edited question, so it is held to the same bound.
+_TEXT_MAX_CHARS = 4096
 
 
 class AskServer:
@@ -43,6 +47,8 @@ class AskServer:
         rate: RateLimiter,
         audit: Any,
         *,
+        operator_chat_id: int | None,
+        limits: LimitsConfig,
         poll_interval_s: float,
         answer_ttl_s: int,
         heartbeat_stale_s: int,
@@ -54,6 +60,8 @@ class AskServer:
         self._client = client
         self._rate = rate
         self._audit = audit
+        self._operator_chat_id = operator_chat_id
+        self._limits = limits
         self._poll_interval_s = poll_interval_s
         self._answer_ttl_s = answer_ttl_s
         self._heartbeat_stale_s = heartbeat_stale_s
@@ -132,9 +140,36 @@ class AskServer:
                 {"owner_pid": os.getpid(), "at": now, "expires_at": req["expires_at"]},
             ):
                 continue
+            refused = self._refusal(req)
+            if refused is not None:
+                log.warning("ask_server: refusing request %s: %s", key, refused)
+                self._write_answer(key, "", "invalid_request", detail=refused)
+                continue
             task = asyncio.create_task(self._serve_one(key, req), name=f"mcgram-ask-{key}")
             self._serving[key] = task
             task.add_done_callback(lambda t, k=key: self._serving.pop(k, None))
+
+    def _refusal(self, req: dict[str, Any]) -> str | None:
+        """Why this owner will not post the request, or None.
+
+        Any process running as this user can write a request, so the owner
+        holds it to its own config rather than trusting the requester's checks.
+        """
+        limits = self._limits
+        options = req.get("options")
+        if self._operator_chat_id is None or req["chat_id"] != self._operator_chat_id:
+            return "chat_id is not this instance's operator chat"
+        if len(req["question"]) > _TEXT_MAX_CHARS:
+            return f"question is longer than {_TEXT_MAX_CHARS} characters"
+        if req["timeout_s"] > limits.ask_timeout_max_s:
+            return f"timeout_s exceeds ask_timeout_max_s ({limits.ask_timeout_max_s})"
+        if req.get("multi_select") and not options:
+            return "multi_select requires options"
+        if options is not None and len(options) > limits.ask_options_max:
+            return f"more options than ask_options_max ({limits.ask_options_max})"
+        if options is not None and not all(0 < len(o) <= _TEXT_MAX_CHARS for o in options):
+            return f"an option label is empty or longer than {_TEXT_MAX_CHARS} characters"
+        return None
 
     def _maybe_sweep(self) -> None:
         now = time.time()

@@ -19,6 +19,7 @@ from mcgram.ask_broker import HEARTBEAT_KEY, HEARTBEAT_KIND, PROTOCOL_VERSION, A
 from mcgram.ask_registry import AskRegistry
 from mcgram.ask_server import AskServer
 from mcgram.audit import AuditLog
+from mcgram.config import LimitsConfig
 from mcgram.errors import TelegramError
 from mcgram.rate_limiter import RateLimiter
 from mcgram.spool import Spool
@@ -79,6 +80,8 @@ def _server(
         cli,  # type: ignore[arg-type]
         RateLimiter(rate_per_min),
         AuditLog(tmp_path / "audit.jsonl"),
+        operator_chat_id=42,
+        limits=LimitsConfig(),
         poll_interval_s=kw.get("poll_interval_s", 0.01),
         answer_ttl_s=kw.get("answer_ttl_s", 300),
         heartbeat_stale_s=kw.get("heartbeat_stale_s", 90),
@@ -102,6 +105,7 @@ def _request(spool: Spool, key: str = Q, **kw: Any) -> None:
             "requester_pid": 999,
             "created_at": now,
             "expires_at": kw.get("expires_at", now + 60),
+            **{k: kw[k] for k in ("multi_select", "columns") if k in kw},
         },
     )
 
@@ -231,6 +235,38 @@ async def test_malformed_request_is_skipped_not_raised(tmp_path: Path, bad: dict
     assert cli.sent == []
 
 
+@pytest.mark.parametrize(
+    ("bad", "why"),
+    [
+        ({"chat_id": 7}, "operator chat"),
+        ({"options": [str(n) for n in range(7)]}, "ask_options_max"),
+        ({"options": ["x" * 4097]}, "label"),
+        ({"question": "q" * 4097}, "question"),
+        ({"timeout_s": 601}, "ask_timeout_max_s"),
+        ({"multi_select": True, "options": None}, "multi_select"),
+    ],
+    ids=["foreign-chat", "too-many-options", "long-label", "long-question",
+         "long-timeout", "multi-select-without-options"],
+)
+async def test_request_outside_the_owners_limits_is_refused_with_an_answer(
+    tmp_path: Path, bad: dict, why: str
+) -> None:
+    """Any process running as this user can write a request. The owner holds
+    it to its own config — not the requester's — and says why it refused, so
+    the requester fails at once instead of waiting out its timeout."""
+    server, spool, _, cli = _server(tmp_path)
+    _request(spool, **bad)
+    task = asyncio.create_task(server.run())
+    try:
+        assert await _until(lambda: spool.read(Q, "answer") is not None)
+    finally:
+        task.cancel()
+    answer = spool.read(Q, "answer")
+    assert answer is not None and answer["source"] == "invalid_request"
+    assert why in answer["detail"]
+    assert cli.sent == []
+
+
 # --- exclusivity ------------------------------------------------------------
 
 
@@ -246,6 +282,8 @@ async def test_two_servers_on_one_spool_serve_a_request_once(tmp_path: Path) -> 
         cli_b,  # type: ignore[arg-type]
         RateLimiter(100),
         AuditLog(tmp_path / "audit.jsonl"),
+        operator_chat_id=42,
+        limits=LimitsConfig(),
         poll_interval_s=0.01,
         answer_ttl_s=300,
         heartbeat_stale_s=90,
