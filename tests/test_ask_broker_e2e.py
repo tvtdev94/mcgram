@@ -168,7 +168,7 @@ async def test_requester_and_chat_agree_on_the_outcome(
     owner.client.post_delay_s, owner.client.edit_delay_s = post_delay_s, edit_delay_s
 
     async def operator_taps_once_posted() -> None:
-        if await _until(lambda: bool(registry._pending)):
+        if await _until(lambda: bool(owner.client.sent)):
             q_id = next(iter(registry._pending))
             await registry.handle_update({"callback_query": {"id": "cb", "data": f"{q_id}:0"}})
 

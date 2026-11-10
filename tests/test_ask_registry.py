@@ -41,6 +41,44 @@ class FakeClient:
         return True
 
 
+async def test_tap_delivered_before_the_post_returns_still_answers() -> None:
+    """getUpdates and sendMessage are separate requests: the operator's tap can
+    reach the poll loop before sendMessage's own response does. Dropping that
+    tap leaves the question hanging until it times out."""
+    client = FakeClient()
+    reg = AskRegistry()
+    reg.set_answer_hook(client.answer_callback_query)
+    post = client.send_message
+
+    async def post_then_tap_lands_first(chat_id: int, text: str, **kw: Any) -> dict[str, Any]:
+        msg = await post(chat_id, text, **kw)
+        tap = kw["reply_markup"]["inline_keyboard"][1][0]["callback_data"]
+        await reg.handle_update({"callback_query": {"id": "cq1", "data": tap}})
+        return msg
+
+    client.send_message = post_then_tap_lands_first  # type: ignore[method-assign]
+    result = await asyncio.wait_for(
+        reg.open(client, chat_id=1, question="Q?", options=["Yes", "No"], timeout_s=30), 2)
+    assert (result["value"], result["source"]) == ("No", "button")
+
+
+async def test_freetext_sent_while_the_question_is_still_posting_is_not_its_answer() -> None:
+    """Registering early must not widen what a typed reply can answer: the
+    operator cannot have seen the question before it was posted."""
+    client = FakeClient()
+    reg = AskRegistry()
+    post = client.send_message
+
+    async def reply_arrives_during_post(chat_id: int, text: str, **kw: Any) -> dict[str, Any]:
+        await reg.handle_update({"message": {"chat": {"id": 1}, "text": "unrelated",
+                                             "date": int(time.time()) + 60}})
+        return await post(chat_id, text, **kw)
+
+    client.send_message = reply_arrives_during_post  # type: ignore[method-assign]
+    result = await reg.open(client, chat_id=1, question="Q?", options=None, timeout_s=1)
+    assert result["source"] == "timeout"
+
+
 def test_build_keyboard_one_button_per_row() -> None:
     kb = _build_keyboard("q_x", ["A", "B"])
     assert kb["inline_keyboard"] == [

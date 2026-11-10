@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import math
 import secrets
 import time
 from collections.abc import Callable
@@ -102,33 +103,45 @@ class AskRegistry:
             _build_keyboard(q_id, options, columns=columns, multi_select=multi_select)
             if options else None
         )
-        msg = await client.send_message(chat_id, question, reply_markup=reply_markup)
-        loop = asyncio.get_running_loop()
-        fut: asyncio.Future = loop.create_future()
-        self._pending[q_id] = PendingAsk(
+        fut: asyncio.Future = asyncio.get_running_loop().create_future()
+        # Registered before posting. getUpdates and sendMessage are separate
+        # requests, so the operator's tap can reach the poll loop before
+        # sendMessage's own response does; a tap can only come from this
+        # message (its callback_data carries q_id), so accepting it early is
+        # safe. Typed replies stay locked out until the post returns
+        # (`posted_at` is infinite until then).
+        pending = PendingAsk(
             question_id=q_id,
             future=fut,
-            message_id=msg["message_id"],
+            message_id=0,
             chat_id=chat_id,
             options=options,
-            posted_at=time.time(),
+            posted_at=math.inf,
             multi_select=multi_select,
             columns=columns,
             client=client,
         )
-        wait_s = timeout_s if deadline is None else max(0.0, deadline - time.time())
+        self._pending[q_id] = pending
         try:
-            value, source = await asyncio.wait_for(fut, timeout=wait_s)
-        except TimeoutError:
-            empty: str | list[str] = [] if multi_select else ""
-            if on_outcome is not None:
-                on_outcome(empty, "timeout")
-            await _mark_timed_out(client, chat_id, msg["message_id"], question)
-            return {"value": empty, "source": "timeout", "question_id": q_id}
-        except asyncio.CancelledError:
-            # Shutdown: nobody will read a tap on this question any more.
-            await _mark_abandoned(client, chat_id, msg["message_id"], question)
-            raise
+            msg = await client.send_message(chat_id, question, reply_markup=reply_markup)
+            pending.message_id, pending.posted_at = msg["message_id"], time.time()
+            wait_s = timeout_s if deadline is None else max(0.0, deadline - time.time())
+            try:
+                value, source = await asyncio.wait_for(fut, timeout=wait_s)
+                if deadline is not None and time.time() > deadline:
+                    # Tapped while the post was still returning, but by now the
+                    # caller's clock has run out: it can no longer hear this.
+                    raise TimeoutError
+            except TimeoutError:
+                empty: str | list[str] = [] if multi_select else ""
+                if on_outcome is not None:
+                    on_outcome(empty, "timeout")
+                await _mark_timed_out(client, chat_id, msg["message_id"], question)
+                return {"value": empty, "source": "timeout", "question_id": q_id}
+            except asyncio.CancelledError:
+                # Shutdown: nobody will read a tap on this question any more.
+                await _mark_abandoned(client, chat_id, msg["message_id"], question)
+                raise
         finally:
             self._pending.pop(q_id, None)
         if on_outcome is not None:
