@@ -66,7 +66,7 @@ operator's answer. See [Broker spool](#broker-spool).
 | Threat | Mitigation |
 |---|---|
 | Prompt injection spams `send_message` 1000×/sec | Per-tool token bucket (default 20/min). 21st call rejected with `RateLimitError`. |
-| Prompt injection schedules 1000 reminders for 24h later (memory exhaustion) | `reminder_max_pending` (default 10) + `reminder_max_delay_s` (24h) + `reminder_text_max_chars` (1000). |
+| Prompt injection schedules 1000 reminders for 24h later (memory exhaustion) | `reminder_max_pending` (default 10; a process holds at most twice that, own plus adopted) + `reminder_max_delay_s` (24h) + `reminder_text_max_chars` (1000). |
 | Prompt injection uses `ask(timeout_s=86400)` to freeze Claude forever | `limits.ask_timeout_max_s` (default 600s) hard-caps the wait. |
 | Prompt injection uploads a 10 GB file | `limits.file_max_bytes` (default 50 MB — Telegram's hard limit anyway). |
 | Telegram API returns persistent 5xx | Polling backs off exponentially (1s → 30s). Send tools fail-fast with `telegram_api` error and audit. |
