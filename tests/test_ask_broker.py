@@ -262,15 +262,17 @@ def test_rejected_answer_is_logged(tmp_path: Path, caplog: pytest.LogCaptureFixt
 # --- close_request ----------------------------------------------------------
 
 
-def test_close_request_removes_every_record(tmp_path: Path) -> None:
+def test_close_request_removes_request_and_answer_but_keeps_the_claim(tmp_path: Path) -> None:
+    """The claim is what stops an owner serving the request again; it expires
+    with the request and the sweep removes it."""
     broker, spool, _ = _make(tmp_path)
     broker.open_request(Q, question="a", options=None, chat_id=1, timeout_s=5)
     spool.write_exclusive(Q, "taken", {"expires_at": time.time() + 60})
     _answer(spool, pid=os.getpid())
     broker.close_request(Q)
     assert spool.keys("request") == set()
-    assert spool.keys("taken") == set()
     assert spool.keys("answer") == set()
+    assert spool.keys("taken") == {Q}
 
 
 def test_close_request_is_idempotent(tmp_path: Path) -> None:

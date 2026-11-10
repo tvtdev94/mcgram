@@ -131,8 +131,15 @@ class AskBroker:
         return self._read_trusted_answer(q_id)
 
     def close_request(self, q_id: str) -> None:
-        """Drop every record for this ask. Safe to call twice."""
-        self._spool.remove(q_id, "request", "taken", "answer")
+        """Drop the request and its answer. Safe to call twice.
+
+        The owner's `taken` claim is deliberately left for the sweep: it expires
+        with the request. Deleting it here would let an owner serve the request
+        a second time whenever the request itself survives — on Windows a
+        concurrent reader makes its unlink fail — or whenever an owner listed it
+        just before it was deleted.
+        """
+        self._spool.remove(q_id, "request", "answer")
 
     def _read_trusted_answer(self, q_id: str) -> dict[str, Any] | None:
         answer = self._spool.read(q_id, "answer")

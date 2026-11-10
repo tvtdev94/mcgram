@@ -212,7 +212,7 @@ Requester (`ask_via_broker`):
 2. Only `operator_chat_id` can answer (the poll loop drops other chats), so any other channel returns `ask_requires_operator_chat`.
 3. Write the request (`write_exclusive`). If the write fails, return `broker_unavailable` before anything is posted.
 4. Poll for the answer every `poll_interval_s`, with one final read after the deadline. Reject answers whose `answered_by_pid` is not the poll-lock holder.
-5. Always remove request, taken and answer files. An owner-side failure (`rate_limited`, `telegram_error`, `cancelled`, …) is returned as an error, never as a timeout.
+5. Always remove the request and answer files. The owner's `taken` claim stays until it expires with the request (the sweep drops it), so a request whose file could not be deleted — on Windows a concurrent reader makes the unlink fail — is never served twice. An owner-side failure (`rate_limited`, `telegram_error`, `cancelled`, …) is returned as an error, never as a timeout.
 
 Owner (`broker_wiring.serve_while_owner`): a supervisor task watches `state.ask_registry` and runs an `AskServer` exactly while this process holds the poll lock. On demotion it withdraws its heartbeat, so requesters fail fast instead of waiting out `heartbeat_stale_s`. The server claims each request with `taken`, spends the **owner's** rate-limit budget (one bot token, one budget), and writes an answer on every path. Serving happens in a background task, never inside the update dispatcher. The same supervisor sweeps expired records while not owning, so cleanup also runs where nobody polls.
 

@@ -446,3 +446,38 @@ async def test_round_trip_times_out_cleanly_when_nobody_answers(tmp_path: Path) 
     assert answer is not None
     assert answer["source"] == "timeout"
     assert answer["value"] == ""
+
+
+async def test_request_that_could_not_be_deleted_is_never_served_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On Windows another process reading the request file makes its unlink
+    fail (WinError 32). The claim must outlive it, or the next scan sees an
+    unclaimed request and posts the same question a second time."""
+    server, spool, reg, cli = _server(tmp_path)
+    lock_path = tmp_path / ".lock"
+    lock_path.write_text(str(os.getpid()), encoding="utf-8")
+    broker = AskBroker(Spool(tmp_path / "spool", "asks"), lock_path,
+                       poll_interval_s=0.01, ttl_pad_s=30, heartbeat_stale_s=90)
+    task = asyncio.create_task(server.run())
+    try:
+        assert broker.open_request(Q, question="?", options=["Yes"], chat_id=42, timeout_s=10)
+        assert await _until(lambda: bool(reg._pending))
+        q_id = next(iter(reg._pending))
+        await reg.handle_update({"callback_query": {"id": "cb", "data": f"{q_id}:0"}})
+        assert await broker.wait_for_answer(Q, timeout_s=3) is not None
+
+        real_unlink = Path.unlink
+
+        def busy_request(self: Path, missing_ok: bool = False) -> None:
+            if self.name.endswith(".request.json"):
+                raise PermissionError(32, "being used by another process", str(self))
+            real_unlink(self, missing_ok=missing_ok)
+
+        monkeypatch.setattr(Path, "unlink", busy_request)
+        broker.close_request(Q)
+        assert spool.read(Q, "request") is not None  # the failure really happened
+        await asyncio.sleep(0.15)  # many scans over the surviving request
+    finally:
+        task.cancel()
+    assert len(cli.sent) == 1
