@@ -25,6 +25,12 @@ audit.jsonl
 audit.jsonl.*
 .lock
 
+# Release builds (see docs/release.md)
+build-out/
+
+# Agent tooling (worktrees, agent memory)
+.claude/
+
 # IDE
 .vscode/
 .idea/
