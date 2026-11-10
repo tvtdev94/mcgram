@@ -13,7 +13,7 @@ from mcgram.discord_client import (
     format_mention_prefix,
     resolve_mentions,
 )
-from mcgram.errors import DiscordError
+from mcgram.errors import DiscordError, TransportError
 
 WEBHOOK = "https://discord.com/api/webhooks/123456789/abctoken"
 
@@ -177,16 +177,84 @@ async def test_unknown_channel_thread_maps_to_friendly_reason(httpx_mock) -> Non
     assert "thread_id" in exc.value.description
 
 
-async def test_rate_limit_reports_retry_after(httpx_mock) -> None:
-    httpx_mock.add_response(
-        method="POST", status_code=429,
-        json={"message": "You are being rate limited.", "retry_after": 0.5},
-    )
+@pytest.fixture
+def sleeps(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """Record rate-limit sleeps instead of actually waiting."""
+    calls: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        calls.append(seconds)
+
+    monkeypatch.setattr("mcgram.discord_client._sleep", fake_sleep)
+    return calls
+
+
+_RATE_LIMITED = {"message": "You are being rate limited.", "retry_after": 0.5}
+
+
+async def test_rate_limit_retried_once_then_succeeds(httpx_mock, sleeps) -> None:
+    httpx_mock.add_response(method="POST", status_code=429, json=_RATE_LIMITED)
+    httpx_mock.add_response(method="POST", json={"id": "m1"})
+    async with DiscordClient() as c:
+        out = await c.send_message(WEBHOOK, "hi")
+    assert out["id"] == "m1"
+    assert sleeps == [0.5]
+
+
+async def test_rate_limit_reports_retry_after(httpx_mock, sleeps) -> None:
+    # Still limited after the one retry: surface the wait to the caller.
+    httpx_mock.add_response(method="POST", status_code=429, json=_RATE_LIMITED)
+    httpx_mock.add_response(method="POST", status_code=429, json=_RATE_LIMITED)
     async with DiscordClient() as c:
         with pytest.raises(DiscordError) as exc:
             await c.send_message(WEBHOOK, "hi")
     assert exc.value.status == 429
     assert "0.5" in exc.value.description
+    assert sleeps == [0.5]
+
+
+async def test_rate_limit_over_cap_is_not_retried(httpx_mock, sleeps) -> None:
+    httpx_mock.add_response(
+        method="POST", status_code=429, json={**_RATE_LIMITED, "retry_after": 300},
+    )
+    async with DiscordClient() as c:
+        with pytest.raises(DiscordError):
+            await c.send_message(WEBHOOK, "hi")
+    assert sleeps == []
+    assert len(httpx_mock.get_requests()) == 1
+
+
+# --------------------------------------------------------------------------- #
+# edit_message
+# --------------------------------------------------------------------------- #
+
+async def test_edit_message_patches_message_in_thread(httpx_mock) -> None:
+    httpx_mock.add_response(method="PATCH", json={"id": "555", "content": "new"})
+    async with DiscordClient() as c:
+        out = await c.edit_message(WEBHOOK, "555", "new", thread_id="777")
+    assert out["id"] == "555"
+    req = httpx_mock.get_requests()[0]
+    assert req.method == "PATCH"
+    assert req.url.path == "/api/webhooks/123456789/abctoken/messages/555"
+    assert req.url.params.get("thread_id") == "777"
+    body = json.loads(req.content)
+    # An edit must never ping anyone.
+    assert body == {"content": "new", "allowed_mentions": {"parse": []}}
+
+
+async def test_edit_message_rejects_non_numeric_id() -> None:
+    async with DiscordClient() as c:
+        with pytest.raises(ValueError):
+            await c.edit_message(WEBHOOK, "../../evil", "x")
+
+
+async def test_edit_transport_error_scrubs_token(httpx_mock) -> None:
+    # On an edit URL the token is not the last path segment.
+    httpx_mock.add_exception(httpx.ConnectError(f"cannot reach {WEBHOOK}/messages/555"))
+    async with DiscordClient() as c:
+        with pytest.raises(TransportError) as exc:
+            await c.edit_message(WEBHOOK, "555", "x")
+    assert "abctoken" not in exc.value.detail
 
 
 async def test_error_without_json_body_uses_http_status(httpx_mock) -> None:

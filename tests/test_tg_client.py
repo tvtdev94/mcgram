@@ -158,3 +158,82 @@ async def test_custom_api_root(httpx_mock) -> None:
 
 # Suppress unused-import warning for `httpx`
 _ = httpx
+
+
+# --------------------------------------------------------------------------- #
+# Flood-control (HTTP 429) retry
+# --------------------------------------------------------------------------- #
+
+def _flood(retry_after: int) -> dict:
+    return {
+        "ok": False, "error_code": 429,
+        "description": f"Too Many Requests: retry after {retry_after}",
+        "parameters": {"retry_after": retry_after},
+    }
+
+
+@pytest.fixture
+def sleeps(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """Record flood-wait sleeps instead of actually waiting."""
+    calls: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        calls.append(seconds)
+
+    monkeypatch.setattr("mcgram.tg_client._sleep", fake_sleep)
+    return calls
+
+
+async def test_flood_wait_retries_upload_once_with_full_file(
+    httpx_mock, tmp_path: Path, sleeps: list[float]
+) -> None:
+    p = tmp_path / "f.txt"
+    p.write_bytes(b"file-body-123")
+    url = "https://api.telegram.org/botT/sendDocument"
+    httpx_mock.add_response(url=url, status_code=429, json=_flood(3))
+    httpx_mock.add_response(url=url, json={"ok": True, "result": {"message_id": 9}})
+    async with TelegramClient("T") as c:
+        r = await c.send_document(1, p)
+    assert r["message_id"] == 9
+    assert sleeps == [3]
+    # The retry must re-send the whole file, not an exhausted handle.
+    bodies = [req.content for req in httpx_mock.get_requests()]
+    assert len(bodies) == 2
+    assert all(b"file-body-123" in body for body in bodies)
+
+
+async def test_flood_wait_gives_up_after_one_retry(httpx_mock, sleeps: list[float]) -> None:
+    url = "https://api.telegram.org/botT/sendMessage"
+    httpx_mock.add_response(url=url, status_code=429, json=_flood(1))
+    httpx_mock.add_response(url=url, status_code=429, json=_flood(1))
+    async with TelegramClient("T") as c:
+        with pytest.raises(TelegramError) as exc:
+            await c.send_message(1, "hi")
+    assert exc.value.status == 429
+    assert sleeps == [1]
+
+
+async def test_flood_wait_over_cap_fails_without_waiting(
+    httpx_mock, sleeps: list[float]
+) -> None:
+    httpx_mock.add_response(
+        url="https://api.telegram.org/botT/sendMessage", status_code=429, json=_flood(120),
+    )
+    async with TelegramClient("T") as c:
+        with pytest.raises(TelegramError) as exc:
+            await c.send_message(1, "hi")
+    assert "retry after 120" in exc.value.description
+    assert sleeps == []
+    assert len(httpx_mock.get_requests()) == 1
+
+
+async def test_get_updates_leaves_flood_wait_to_poll_loop(
+    httpx_mock, sleeps: list[float]
+) -> None:
+    httpx_mock.add_response(
+        url="https://api.telegram.org/botT/getUpdates", status_code=429, json=_flood(2),
+    )
+    async with TelegramClient("T") as c:
+        with pytest.raises(TelegramError):
+            await c.get_updates(offset=0, timeout=1)
+    assert sleeps == []

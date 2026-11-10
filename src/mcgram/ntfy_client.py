@@ -78,10 +78,24 @@ class NtfyClient:
             return {"status": resp.status_code}
 
     @staticmethod
-    def _silent_priority(silent: bool, priority: int | None) -> int | None:
-        if priority is not None:
-            return priority
-        return 1 if silent else None
+    def _meta_headers(
+        silent: bool,
+        *,
+        title: str | None = None,
+        priority: int | None = None,
+        tags: list[str] | None = None,
+    ) -> dict[str, str]:
+        """Title / Priority / Tags headers. An explicit `priority` wins over
+        `silent` (which maps to priority 1, ntfy's `min`)."""
+        headers: dict[str, str] = {}
+        if title:
+            headers["Title"] = _ascii_header(title)
+        eff_priority = priority if priority is not None else (1 if silent else None)
+        if eff_priority is not None:
+            headers["Priority"] = str(eff_priority)
+        if tags:
+            headers["Tags"] = _ascii_header(",".join(tags))
+        return headers
 
     async def send_message(
         self,
@@ -95,14 +109,10 @@ class NtfyClient:
         silent: bool = False,
     ) -> dict[str, Any]:
         """POST text to `<server>/<topic>`. Returns parsed JSON response."""
-        headers: dict[str, str] = {"Content-Type": "text/plain; charset=utf-8"}
-        if title:
-            headers["Title"] = _ascii_header(title)
-        eff_priority = self._silent_priority(silent, priority)
-        if eff_priority is not None:
-            headers["Priority"] = str(eff_priority)
-        if tags:
-            headers["Tags"] = ",".join(tags)
+        headers: dict[str, str] = {
+            "Content-Type": "text/plain; charset=utf-8",
+            **self._meta_headers(silent, title=title, priority=priority, tags=tags),
+        }
         if markdown:
             headers["Markdown"] = "yes"
         return await self._request(
@@ -117,9 +127,18 @@ class NtfyClient:
         *,
         caption: str | None = None,
         silent: bool = False,
+        title: str | None = None,
+        priority: int | None = None,
+        tags: list[str] | None = None,
     ) -> dict[str, Any]:
-        """PUT binary body with Filename header. Returns parsed JSON response."""
-        return await self._upload(topic, path, caption=caption, silent=silent)
+        """PUT binary body with Filename header. Returns parsed JSON response.
+
+        The filename keeps its extension, which is what the ntfy apps use to
+        preview image attachments inline."""
+        return await self._upload(
+            topic, path, caption=caption, silent=silent,
+            title=title, priority=priority, tags=tags,
+        )
 
     async def send_video(
         self,
@@ -128,9 +147,15 @@ class NtfyClient:
         *,
         caption: str | None = None,
         silent: bool = False,
+        title: str | None = None,
+        priority: int | None = None,
+        tags: list[str] | None = None,
     ) -> dict[str, Any]:
         """Same wire shape as send_file; mobile app inline-plays video/* MIME."""
-        return await self._upload(topic, path, caption=caption, silent=silent)
+        return await self._upload(
+            topic, path, caption=caption, silent=silent,
+            title=title, priority=priority, tags=tags,
+        )
 
     async def _upload(
         self,
@@ -139,16 +164,19 @@ class NtfyClient:
         *,
         caption: str | None,
         silent: bool,
+        title: str | None = None,
+        priority: int | None = None,
+        tags: list[str] | None = None,
     ) -> dict[str, Any]:
-        headers: dict[str, str] = {"Filename": _ascii_header(path.name)}
+        headers: dict[str, str] = {
+            "Filename": _ascii_header(path.name),
+            **self._meta_headers(silent, title=title, priority=priority, tags=tags),
+        }
         mime, _ = mimetypes.guess_type(path.name)
         if mime:
             headers["Content-Type"] = mime
         if caption:
             headers["Message"] = _ascii_header(caption)
-        eff_priority = self._silent_priority(silent, None)
-        if eff_priority is not None:
-            headers["Priority"] = str(eff_priority)
         with open(path, "rb") as f:
             body = f.read()
         return await self._request(
@@ -170,7 +198,10 @@ class NtfyClient:
 def _ascii_header(value: str) -> str:
     """ntfy HTTP headers must be latin-1 safe; collapse non-ASCII to '?'.
 
+    Line breaks become spaces: a header value cannot carry CR/LF, and httpx
+    refuses to send one that does (a multi-line caption would otherwise fail).
     Use RFC 2047 in callers if they need to send non-ASCII titles/captions.
     For now, this guard prevents httpx encoding errors on emoji etc.
     """
-    return value.encode("ascii", "replace").decode("ascii")
+    flat = " ".join(value.splitlines())
+    return flat.encode("ascii", "replace").decode("ascii")
