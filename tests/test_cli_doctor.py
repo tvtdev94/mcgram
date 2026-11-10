@@ -105,3 +105,26 @@ def test_get_me_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     rc = doctor()
     assert rc == 1
     assert "FAIL" in capsys.readouterr().out
+
+
+def test_unusable_spool_fails_doctor(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                     capsys: pytest.CaptureFixture[str], httpx_mock) -> None:
+    """Pending reminders persist to ~/.mcgram/spool; doctor must flag a spool
+    mcgram cannot create, or reminders silently become memory-only again."""
+    (tmp_path / "home" / ".mcgram").mkdir()
+    (tmp_path / "home" / ".mcgram" / "spool").write_text("not a directory", encoding="utf-8")
+    cfg = tmp_path / "config.yaml"
+    _write_config(cfg, tmp_path / "audit.jsonl")
+    monkeypatch.setenv("MCGRAM_CONFIG", str(cfg))
+    monkeypatch.setenv("TEST_TOKEN", "fake:abcd1234")
+    httpx_mock.add_response(
+        url="https://api.telegram.org/botfake:abcd1234/getMe",
+        json={"ok": True, "result": {"id": 1, "username": "test_bot"}},
+    )
+    httpx_mock.add_response(
+        url="https://api.telegram.org/botfake:abcd1234/sendMessage",
+        json={"ok": True, "result": {"message_id": 99}},
+    )
+    rc = doctor()
+    assert rc == 1
+    assert "[FAIL] spool/reminders" in capsys.readouterr().out

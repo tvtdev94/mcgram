@@ -64,6 +64,14 @@ audit:
 # Set true ONLY if you trust the caller — Claude Code can ask to send any file on disk.
 allow_outside_cwd: false
 
+# === Ask broker (optional, OFF by default) ===================================
+# Lets every Claude Code session use `ask`, not only the one polling Telegram.
+# Question/answer text sits in ~/.mcgram/spool/ (0600, short TTL) while open,
+# and any process running as your user could write an answer file there.
+# Read docs/security-threat-model.md before enabling.
+# broker:
+#   enabled: false
+
 # === Named channels (optional) ============================================
 # Add extra destinations beyond the auto-created `default`. Each channel
 # declares its transport. Example:
