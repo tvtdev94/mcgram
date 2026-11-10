@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from mcgram.spool import Spool, new_key, valid_key
+from mcgram.spool_safety import probe_dir
 
 POSIX_ONLY = pytest.mark.skipif(sys.platform == "win32", reason="POSIX modes/uid only")
 
@@ -495,6 +496,30 @@ def test_probe_rejects_unwritable_root(tmp_path: Path) -> None:
         assert reason != "ok"
     finally:
         root.chmod(0o700)
+
+
+def test_probe_creates_every_level_between_root_and_leaf(tmp_path: Path) -> None:
+    root = tmp_path / "spool"
+    leaf = root / "0123456789abcdef" / "asks"
+    ok, reason = probe_dir(root, leaf)
+    assert (ok, reason) == (True, "ok")
+    assert leaf.is_dir()
+
+
+@POSIX_ONLY
+def test_probe_rejects_world_writable_middle_level(tmp_path: Path) -> None:
+    """Every directory between root and leaf can swap the one below it."""
+    root = tmp_path / "spool"
+    middle = root / "0123456789abcdef"
+    (middle / "asks").mkdir(parents=True, mode=0o700)
+    root.chmod(0o700)
+    middle.chmod(0o777)
+    try:
+        ok, reason = probe_dir(root, middle / "asks")
+        assert ok is False
+        assert str(middle) in reason and "wider than 0700" in reason
+    finally:
+        middle.chmod(0o700)
 
 
 def test_probe_fails_when_root_path_is_a_file(tmp_path: Path) -> None:

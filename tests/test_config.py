@@ -176,8 +176,31 @@ def test_spool_dir_does_not_follow_audit_path(
     )
     s = Settings.load(cfg)
     assert s.home_dir == tmp_path / "elsewhere"
-    assert s.spool_root == fake_home / ".mcgram" / "spool"
+    assert s.spool_root.parent == fake_home / ".mcgram" / "spool"
     assert (tmp_path / "elsewhere") not in s.spool_root.parents
+
+
+def test_spool_root_is_separate_per_config_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Spool records name a channel, not a config. Two configs sharing one spool
+    would adopt and send each other's reminders, and a requester would trust the
+    other config's broker heartbeat and block until its timeout."""
+    fake_home = tmp_path / "fakehome"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setenv("USERPROFILE", str(fake_home))
+    personal, work = tmp_path / "personal", tmp_path / "work"
+    for d in (personal, work):
+        d.mkdir()
+        _write_yaml(d / "config.yaml", "bot:\n  operator_chat_id: 1\n")
+
+    root_p = Settings.load(personal / "config.yaml").spool_root
+    root_w = Settings.load(work / "config.yaml").spool_root
+    assert root_p != root_w
+    assert root_p.parent == root_w.parent == fake_home / ".mcgram" / "spool"
+    # The same file reached by another spelling is the same config.
+    assert Settings.load(work / ".." / "personal" / "config.yaml").spool_root == root_p
 
 
 def test_spool_dir_explicit_override(tmp_path: Path) -> None:
@@ -188,4 +211,4 @@ def test_spool_dir_explicit_override(tmp_path: Path) -> None:
         f"bot:\n  operator_chat_id: 1\nbroker:\n  spool_dir: {spool}\n",
     )
     s = Settings.load(cfg)
-    assert s.spool_root == tmp_path / "myspool"
+    assert s.spool_root.parent == tmp_path / "myspool"

@@ -19,7 +19,7 @@ import time
 from typing import TYPE_CHECKING, Any
 
 from .ask_broker import HEARTBEAT_KEY, HEARTBEAT_KIND, PROTOCOL_VERSION
-from .errors import TelegramError
+from .errors import TelegramError, TransportError
 from .spool import Spool
 
 if TYPE_CHECKING:
@@ -34,6 +34,10 @@ TOOL_NAME = "ask"
 #: Telegram's sendMessage/editMessageText cap. A chosen label is echoed into
 #: the edited question, so it is held to the same bound.
 _TEXT_MAX_CHARS = 4096
+#: Upper bound on the heartbeat period. Requesters only need the heartbeat to
+#: be younger than `heartbeat_stale_s`; rewriting it on every poll tick would
+#: replace a file several times a second for the life of the session.
+_HEARTBEAT_MAX_PERIOD_S = 10.0
 
 
 class AskServer:
@@ -65,6 +69,9 @@ class AskServer:
         self._poll_interval_s = poll_interval_s
         self._answer_ttl_s = answer_ttl_s
         self._heartbeat_stale_s = heartbeat_stale_s
+        # Several beats per stale window, so one failed write is never fatal.
+        self._heartbeat_period_s = min(_HEARTBEAT_MAX_PERIOD_S, heartbeat_stale_s / 6)
+        self._last_beat = -math.inf
         self._tmp_grace_s = tmp_grace_s
         self._sweep_interval_s = sweep_interval_s
         self._serving: dict[str, asyncio.Task] = {}
@@ -87,7 +94,7 @@ class AskServer:
         try:
             while True:
                 try:
-                    self.write_heartbeat()
+                    self._maybe_beat()
                     self._scan_once()
                     self._maybe_sweep()
                 except asyncio.CancelledError:
@@ -103,6 +110,16 @@ class AskServer:
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+
+    def _maybe_beat(self) -> None:
+        """Beat on a fixed cadence, independent of the poll tick.
+
+        Monotonic time, so a wall-clock jump can neither stall the beat nor
+        make it fire every tick. A failed write is retried on the next tick.
+        """
+        now = time.monotonic()
+        if now - self._last_beat >= self._heartbeat_period_s and self.write_heartbeat():
+            self._last_beat = now
 
     def write_heartbeat(self) -> bool:
         """Publish liveness so non-owners can fail fast instead of blocking."""
@@ -224,6 +241,10 @@ class AskServer:
                     key, "", "cancelled",
                     detail="the polling session stopped before the operator answered")
             raise
+        except TransportError as e:
+            # Same outcome as an `ask` in the polling session: nothing was posted.
+            if not answered:
+                self._write_answer(key, "", "transport_unreachable", detail=e.detail)
         except TelegramError as e:
             if not answered:
                 self._write_answer(key, "", "telegram_error", detail=e.description)

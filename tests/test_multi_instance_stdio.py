@@ -30,6 +30,8 @@ from urllib.parse import parse_qs
 
 import pytest
 
+from mcgram.config import Settings
+
 pytestmark = pytest.mark.timeout(120)
 
 _UNREACHABLE = "http://127.0.0.1:9"  # discard port — refuses instantly
@@ -384,7 +386,8 @@ def _start_owner_then_requester(
     cfg = _write_config(tmp_path, api_root=stub.url, broker=True)
     owner = _McgramProcess(cfg, repo_root, tmp_path, "owner")
     owner.initialize()
-    _wait(lambda: (tmp_path / "spool" / "asks" / "u0.heartbeat.json").exists(),
+    heartbeat = Settings.load(cfg).spool_root / "asks" / "u0.heartbeat.json"
+    _wait(heartbeat.exists,
           "the owner's broker heartbeat")
     requester = _McgramProcess(cfg, repo_root, tmp_path, "requester",
                                extra_env={"MCGRAM_POLL_RETRY_S": "600"})

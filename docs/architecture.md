@@ -35,7 +35,7 @@ src/mcgram/
 ├── reminders.py            # asyncio.Task scheduler; saves/reloads/adopts via reminder_spool
 ├── skill_installer.py      # bundled Claude skill installer
 │
-├── spool.py                # atomic JSON records under ~/.mcgram/spool/<namespace>/, TTL sweep
+├── spool.py                # atomic JSON records under ~/.mcgram/spool/<config-id>/<namespace>/, TTL sweep
 ├── spool_safety.py         # spool dir probe: no symlinks, owned by us, mode 0700 (POSIX)
 ├── ask_broker.py           # broker, requester side: heartbeat check, request, wait for answer
 ├── ask_server.py           # broker, owner side: claim requests, serve via AskRegistry.open
@@ -199,8 +199,8 @@ the polling session serves the request through the unchanged
 `AskRegistry.open()`, so a brokered ask is an ordinary pending ask there.
 
 ```
-~/.mcgram/spool/asks/
-├── u0.heartbeat.json   owner, every tick: {pid, at, protocol, expires_at}
+~/.mcgram/spool/<config-id>/asks/
+├── u0.heartbeat.json   owner, every min(10s, heartbeat_stale_s/6): {pid, at, protocol, expires_at}
 ├── q_x.request.json    requester: {question, options, multi_select, columns,
 │                        chat_id, timeout_s, requester_pid, expires_at}
 ├── q_x.taken.json      owner, write_exclusive (O_EXCL) — a request is served once
@@ -220,7 +220,7 @@ Owner (`broker_wiring.serve_while_owner`): a supervisor task watches `state.ask_
 
 `asyncio.create_task(asyncio.sleep(delay) → send_text(⏰ text))`, tracked in two dicts (`_tasks`, `_meta`) keyed by `r_<hex>`. Delivery goes through `dispatch.send_text`, so any transport works.
 
-**Durable — independent of `broker.enabled`.** Each pending reminder is also saved as `~/.mcgram/spool/reminders/r_x.rec.json` (`reminder_spool`), with the owner's pid and a per-process instance token. It is removed when the reminder fires or is cancelled. Shutdown cancels the tasks but **keeps** the records. Every instance runs a watch task that does three things:
+**Durable — independent of `broker.enabled`.** Each pending reminder is also saved as `~/.mcgram/spool/<config-id>/reminders/r_x.rec.json` (`reminder_spool`), with the owner's pid and a per-process instance token. It is removed when the reminder fires or is cancelled. Shutdown cancels the tasks but **keeps** the records. Every instance runs a watch task that does three things:
 
 - **Owner liveness**: an owner counts as alive only while its pid runs **and** its heartbeat `o_<token>.alive.json` is fresher than `heartbeat_stale_s` (refreshed every watcher tick). A reused pid alone never keeps a dead owner's reminders hostage. A silent owner (pid alive, heartbeat stale) is adopted only after two consecutive adoption passes, and an owner re-checks that it still owns a reminder right before firing (audit `_reminder_fire` status `skipped` otherwise).
 - **Adopt orphans** (on start, then every 5s): a record whose owner is not alive gets claimed with `write_exclusive` on `claim<dead-owner-token>`, so exactly one instance wins each generation. The winner rewrites the record as its own and schedules it. Overdue reminders fire at once, with a late note. Reminders cancelled while their owner was down are dropped, not fired. Adoption respects `reminder_max_pending` and the delay/text caps, and skips channels this instance cannot deliver to.
@@ -235,6 +235,6 @@ Delivery is at most once, except when a process is killed between sending and wr
 - `~/.mcgram/.env` — bot token + Discord webhook URLs (credentials only; never version-controlled)
   - Format: `MCGRAM_BOT_TOKEN=<token>` + `DISCORD_<CHANNEL_NAME>=<webhook_url>` (env var names are arbitrary, set via `mcgram channel add-discord`)
 - `~/.mcgram/.lock` — single-instance PID file
-- `~/.mcgram/spool/` — `reminders/` (pending reminders, always) and `asks/` (only with `broker.enabled`); dirs 0700, files 0600 on POSIX. Anchored to the home directory, not to `audit.path`; overridable with `broker.spool_dir`. Local disk only — NFS/SMB shares are unsupported
+- `~/.mcgram/spool/<config-id>/` — `reminders/` (pending reminders, always) and `asks/` (only with `broker.enabled`); dirs 0700, files 0600 on POSIX. `<config-id>` is the first 16 hex of the SHA-256 of the resolved config file path, so sessions on different configs (`MCGRAM_CONFIG`) never share reminders or a broker. Anchored to the home directory, not to `audit.path`; `broker.spool_dir` replaces `~/.mcgram/spool` (the `<config-id>` level stays). Local disk only — NFS/SMB shares are unsupported
 - `~/.mcgram/audit.jsonl[.1..3]` — append-only audit log + rotated backups (redacted if `redact_text: true`)
 - `~/.claude/skills/mcgram/SKILL.md` — companion skill, installed by `mcgram init`

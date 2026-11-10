@@ -20,24 +20,37 @@ _POSIX = sys.platform != "win32"
 
 
 def probe_dir(root: Path, leaf: Path) -> tuple[bool, str]:
-    """(ok, reason) for a spool root and its namespace directory.
+    """(ok, reason) for a spool root and every directory down to `leaf`.
+
+    `leaf` must lie under `root`; each level in between (a per-config directory,
+    say) is created and checked exactly like the two ends.
 
     Windows skips the uid/mode checks — NTFS ACLs on the user profile carry that
     guarantee instead — but still rejects symlinks and unwritable paths.
     """
-    for path in (root, leaf):
+    try:
+        parts = leaf.relative_to(root).parts
+    except ValueError:
+        return False, f"{leaf} is not inside {root}"
+    levels = [root]
+    for part in parts:
+        levels.append(levels[-1] / part)
+    for path in levels:
         if path.is_symlink():
             return False, f"{path} is a symlink"
     try:
+        # One level at a time: `mkdir(parents=True, mode=...)` applies the mode
+        # to the last level only, leaving the ones above it at the umask default.
         root.mkdir(parents=True, exist_ok=True, mode=0o700)
-        leaf.mkdir(exist_ok=True, mode=0o700)
+        for path in levels[1:]:
+            path.mkdir(exist_ok=True, mode=0o700)
     except OSError as e:
         return False, f"cannot create {leaf}: {e}"
     if _POSIX:
-        # Both levels matter: the right to replace a directory entry comes from
-        # write permission on its *parent*, so a 0700 leaf inside a 0777 root is
-        # still swappable by any local user.
-        for path in (root, leaf):
+        # Every level matters: the right to replace a directory entry comes from
+        # write permission on its *parent*, so a 0700 leaf inside a 0777 parent
+        # is still swappable by any local user.
+        for path in levels:
             ok, reason = _check_posix_ownership(path)
             if not ok:
                 return False, reason

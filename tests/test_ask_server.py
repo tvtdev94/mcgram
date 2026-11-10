@@ -20,7 +20,7 @@ from mcgram.ask_registry import AskRegistry
 from mcgram.ask_server import AskServer
 from mcgram.audit import AuditLog
 from mcgram.config import LimitsConfig
-from mcgram.errors import TelegramError
+from mcgram.errors import TelegramError, TransportError
 from mcgram.rate_limiter import RateLimiter
 from mcgram.spool import Spool
 
@@ -138,6 +138,20 @@ async def test_run_publishes_heartbeat(tmp_path: Path) -> None:
     task = asyncio.create_task(server.run())
     try:
         assert await _until(lambda: spool.read(HEARTBEAT_KEY, HEARTBEAT_KIND) is not None)
+    finally:
+        task.cancel()
+
+
+async def test_heartbeat_is_not_rewritten_on_every_poll_tick(tmp_path: Path) -> None:
+    """The scan runs every few hundred ms; the heartbeat only has to beat well
+    inside `heartbeat_stale_s`, not replace a file several times a second."""
+    server, spool, _, _ = _server(tmp_path, poll_interval_s=0.01, heartbeat_stale_s=90)
+    task = asyncio.create_task(server.run())
+    try:
+        assert await _until(lambda: spool.read(HEARTBEAT_KEY, HEARTBEAT_KIND) is not None)
+        first = spool.read(HEARTBEAT_KEY, HEARTBEAT_KIND)
+        await asyncio.sleep(0.2)  # ~20 poll ticks
+        assert spool.read(HEARTBEAT_KEY, HEARTBEAT_KIND) == first
     finally:
         task.cancel()
 
@@ -314,10 +328,20 @@ async def test_a_request_is_not_served_twice_by_one_server(tmp_path: Path) -> No
 # --- failure paths ----------------------------------------------------------
 
 
-async def test_telegram_failure_still_writes_an_answer(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("error", "source", "detail"),
+    [
+        (TelegramError(400, "bad"), "telegram_error", "bad"),
+        (TransportError("telegram", "ConnectError: refused"), "transport_unreachable",
+         "ConnectError: refused"),
+    ],
+)
+async def test_telegram_failure_still_writes_an_answer(
+    tmp_path: Path, error: Exception, source: str, detail: str
+) -> None:
     """Otherwise the requester waits out its timeout and reports `timeout`,
     telling Claude the operator ignored a question Telegram never delivered."""
-    server, spool, _, _ = _server(tmp_path, client=FakeClient(fail_send=TelegramError(400, "bad")))
+    server, spool, _, _ = _server(tmp_path, client=FakeClient(fail_send=error))
     _request(spool)
     task = asyncio.create_task(server.run())
     try:
@@ -326,8 +350,8 @@ async def test_telegram_failure_still_writes_an_answer(tmp_path: Path) -> None:
         task.cancel()
     answer = spool.read(Q, "answer")
     assert answer is not None
-    assert answer["source"] == "telegram_error"
-    assert answer["detail"] == "bad"
+    assert answer["source"] == source
+    assert answer["detail"] == detail
 
 
 async def test_unexpected_failure_still_writes_an_answer(tmp_path: Path) -> None:
