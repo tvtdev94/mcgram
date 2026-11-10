@@ -95,12 +95,13 @@ mcgram doctor    # ✅ get_me OK, ✅ test message delivered
 
 Declare both `ntfy:` and `bot:` in config — each named channel picks its own transport.
 
-## The 7 tools
+## The 8 tools
 
 | Tool | Telegram | ntfy.sh | Discord | When to use |
 |---|:---:|:---:|:---:|---|
 | **`send_message`** | ✅ | ✅ | ✅ | Notify on completion / send a status update |
-| **`send_file`** | ✅ | ✅ | ✅ | Send logs, screenshots, generated artifacts |
+| **`edit_message`** | ✅ | ❌ | ✅ | Update one message in place (live progress) instead of sending many |
+| **`send_file`** | ✅ | ✅ | ✅ | Send logs, screenshots (shown inline), generated artifacts |
 | **`send_video`** | ✅ | ✅ | ✅ | Send a video that **plays in-chat** (mp4/mov/mkv/webm/m4v) |
 | **`ask`** | ✅ | ❌ | ❌ | Question with inline buttons OR freetext, blocks until reply. Telegram-only, and only in the polling session |
 | **`set_reminder`** | ✅ | ✅ | ✅ | Schedule an in-process reminder (per-session; lost on restart) |
@@ -109,11 +110,21 @@ Declare both `ntfy:` and `bot:` in config — each named channel picks its own t
 
 ntfy.sh and Discord have no 2-way input, so `ask` returns `transport_unsupported` on those channels — and `polling_not_owned` in a Telegram session that isn't the one polling ([why](#multiple-claude-code-sessions)). The companion [Claude Code skill](https://github.com/tvtdev94/mcgram/blob/main/src/mcgram/data/skill/SKILL.md) (installed by `mcgram init`) teaches Claude when to call which tool — both **English** and **Vietnamese** trigger phrases are recognized.
 
+Send results carry a `message_id`. Pass it to `edit_message(message_id, text, channel?, thread_id?, parse_mode?)` to replace the text — Telegram `editMessageText`, Discord webhook message edit. Edits never notify or ping anyone; ntfy cannot edit and answers `transport_unsupported`.
+
+Text longer than the channel's message cap (4096 characters on Telegram/ntfy, 2000 on Discord) is not rejected: `send_message` delivers the full text as a `message.txt` attachment captioned with its beginning, and the result says `delivered_as: "file"`. Only text over the transport's file size cap is refused (`text_too_long`).
+
+`send_file` shows images in the chat: png/jpg/jpeg/webp go to Telegram as photos (up to Telegram's 10 MB photo limit) and gif as an animation; if Telegram refuses the image (for example extreme dimensions) it is resent as a plain document with a `note`. The result reports `sent_as` (`photo`, `animation` or `document`); pass `as_document: true` to always send a plain file on Telegram. Discord and ntfy preview image attachments themselves.
+
+Telegram and Discord rate limits (HTTP 429) are retried once after the wait the service asks for, when that wait is 30 seconds or less.
+
 On Telegram, `send_video` reads the video's width, height and duration with `ffprobe` (from ffmpeg) when it is installed and sends them along. Telegram does not size uploads over about 10 MB itself, so without ffprobe a large portrait video shows squashed.
 
 Discord `send_message` / `send_file` / `send_video` accept an optional `thread_id` to post into an existing thread. Discord has no default channel — always name it: `send_message(text="…", channel="eve")`.
 
-They also accept an optional `mention=["alice"]` to **@ping** registered users — e.g. `send_message(text="deploy done", channel="eve", mention=["alice"])`. Names are registered with `mcgram discord mention add`. Only listed users are pinged; `@everyone`/`@here`/roles are always suppressed. Keep Discord messages short and direct — the content cap is **2000 characters**.
+They also accept an optional `mention=["alice"]` to **@ping** registered users — e.g. `send_message(text="deploy done", channel="eve", mention=["alice"])`. Names are registered with `mcgram discord mention add`. Only listed users are pinged; `@everyone`/`@here`/roles are always suppressed. Keep Discord messages short and direct — the content cap is **2000 characters** (longer text goes out as `message.txt`).
+
+On ntfy channels, `send_message` / `send_file` / `send_video` also take `priority` (1 = min … 5 = max/urgent, overrides `silent`), `title` and `tags` (a list, e.g. `["warning", "rocket"]` — emoji shortcodes render as emoji). Telegram and Discord ignore them and say so in the result's `note`. Example: `send_message(text="prod down", channel="alerts", priority=5, title="Pager", tags=["rotating_light"])`.
 
 ## Channels
 
@@ -139,6 +150,8 @@ Then in Claude Code: *"send the failing log to the alerts channel"* → `send_fi
 mcgram                          # MCP stdio server (Claude Code calls this)
 mcgram init [--force]           # scaffold ~/.mcgram/ + skill + auto-register MCP (generates ntfy topic)
 mcgram doctor                   # config + connectivity check (per-transport)
+mcgram test-send NAME [--text T] # send one test message through the normal send path
+mcgram test-send --all          # ...to every configured channel; exit 1 if any send fails
 mcgram audit [opts]             # analyze audit.jsonl: --since 1h, --tool ask, --rejected, --tail
 mcgram channel <action>         # list | add NAME CHAT_ID | add-ntfy NAME [--topic T] | add-discord NAME [--webhook U] | remove NAME
 mcgram discord mention <action> # list | add NAME USER_ID | remove NAME   (Discord @mention registry)

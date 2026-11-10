@@ -111,6 +111,100 @@ async def test_caption_truncated(app_state: AppState, tmp_path: Path, monkeypatc
     assert b"y" * 50 not in body
 
 
+# --------------------------------------------------------------------------- #
+# Images shown inline
+# --------------------------------------------------------------------------- #
+
+TG = "https://api.telegram.org/botfake-token"
+
+
+def _image(tmp_path: Path, monkeypatch, name: str = "shot.png", size: int = 64) -> Path:
+    monkeypatch.chdir(tmp_path)
+    p = tmp_path / name
+    p.write_bytes(b"\x89PNG" + b"\x00" * (size - 4))
+    return p
+
+
+async def test_png_goes_out_as_inline_photo(app_state: AppState, httpx_mock,
+                                            tmp_path: Path, monkeypatch) -> None:
+    p = _image(tmp_path, monkeypatch)
+    httpx_mock.add_response(url=f"{TG}/sendPhoto", json={"ok": True, "result": {"message_id": 3}})
+    out = await send_file.handle(app_state, path=str(p), caption="ui")
+    assert out["ok"] is True
+    assert out["sent_as"] == "photo"
+    body = httpx_mock.get_requests()[0].content
+    assert b'name="photo"; filename="shot.png"' in body
+    assert b"image/png" in body
+
+
+async def test_as_document_keeps_plain_file(app_state: AppState, httpx_mock,
+                                            tmp_path: Path, monkeypatch) -> None:
+    p = _image(tmp_path, monkeypatch)
+    httpx_mock.add_response(url=f"{TG}/sendDocument",
+                            json={"ok": True, "result": {"message_id": 4}})
+    out = await send_file.handle(app_state, path=str(p), as_document=True)
+    assert out["sent_as"] == "document"
+
+
+async def test_photo_rejected_by_telegram_falls_back_to_document(
+    app_state: AppState, httpx_mock, tmp_path: Path, monkeypatch
+) -> None:
+    p = _image(tmp_path, monkeypatch, name="wide.jpg")
+    httpx_mock.add_response(
+        url=f"{TG}/sendPhoto", status_code=400,
+        json={"ok": False, "description": "Bad Request: PHOTO_INVALID_DIMENSIONS"},
+    )
+    httpx_mock.add_response(url=f"{TG}/sendDocument",
+                            json={"ok": True, "result": {"message_id": 5}})
+    out = await send_file.handle(app_state, path=str(p))
+    assert out["ok"] is True
+    assert out["message_id"] == 5
+    assert out["sent_as"] == "document"
+    assert "PHOTO_INVALID_DIMENSIONS" in out["note"]
+
+
+async def test_photo_auth_failure_does_not_double_send(
+    app_state: AppState, httpx_mock, tmp_path: Path, monkeypatch
+) -> None:
+    p = _image(tmp_path, monkeypatch)
+    httpx_mock.add_response(
+        url=f"{TG}/sendPhoto", status_code=403,
+        json={"ok": False, "description": "Forbidden: bot was blocked by the user"},
+    )
+    out = await send_file.handle(app_state, path=str(p))
+    assert out["error"] == "telegram_api"
+    assert len(httpx_mock.get_requests()) == 1
+
+
+async def test_photo_over_10mb_sent_as_document(
+    app_state: AppState, httpx_mock, tmp_path: Path, monkeypatch
+) -> None:
+    p = _image(tmp_path, monkeypatch, size=10 * 1024 * 1024 + 1)
+    httpx_mock.add_response(url=f"{TG}/sendDocument",
+                            json={"ok": True, "result": {"message_id": 6}})
+    out = await send_file.handle(app_state, path=str(p))
+    assert out["sent_as"] == "document"
+    assert "10 MB" in out["note"]
+
+
+async def test_gif_goes_out_as_animation(app_state: AppState, httpx_mock,
+                                         tmp_path: Path, monkeypatch) -> None:
+    p = _image(tmp_path, monkeypatch, name="loop.GIF")
+    httpx_mock.add_response(url=f"{TG}/sendAnimation",
+                            json={"ok": True, "result": {"message_id": 8}})
+    out = await send_file.handle(app_state, path=str(p))
+    assert out["sent_as"] == "animation"
+
+
+async def test_invalid_priority_rejected_before_upload(
+    app_state: AppState, httpx_mock, tmp_path: Path, monkeypatch
+) -> None:
+    p = _image(tmp_path, monkeypatch)
+    out = await send_file.handle(app_state, path=str(p), priority=9)
+    assert out == {"error": "invalid_input", "reason": "invalid_priority", "min": 1, "max": 5}
+    assert httpx_mock.get_requests() == []
+
+
 def test_schema() -> None:
     s = send_file.schema()
     assert s["name"] == "send_file"

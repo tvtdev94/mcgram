@@ -26,6 +26,7 @@ from .polling import poll_loop
 from .rate_limiter import RateLimiter
 from .runtime import AppState
 from .tg_client import TelegramClient
+from .tools import edit_message as tool_edit_message
 from .tools import send_file as tool_send_file
 from .tools import send_message as tool_send_message
 from .tools import send_video as tool_send_video
@@ -44,7 +45,7 @@ def _load_env_beside_config(settings_path: Path) -> None:
 
 
 def _phase2_tool_modules() -> list:
-    return [tool_send_message, tool_send_file, tool_send_video]
+    return [tool_send_message, tool_send_file, tool_send_video, tool_edit_message]
 
 
 async def _serve(state: AppState) -> None:
