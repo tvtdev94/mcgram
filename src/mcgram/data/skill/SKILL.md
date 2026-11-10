@@ -33,7 +33,7 @@ The user may configure **Telegram**, **ntfy.sh**, **Discord**, or any mix. Each 
 |---|---|---|---|
 | `send_message`, `send_file`, `send_video` | ✅ | ✅ | ✅ |
 | `set_reminder`, `cancel_reminder`, `list_reminders` | ✅ | ✅ | ✅ |
-| `ask` | ✅ (polling session only) | ❌ `transport_unsupported` | ❌ `transport_unsupported` |
+| `ask` | ✅ (polling session; other sessions only with the broker on) | ❌ `transport_unsupported` | ❌ `transport_unsupported` |
 
 If `ask` returns `error: "transport_unsupported"`, **do not retry**. Tell the user:
 "This channel is one-way (ntfy.sh / Discord) and doesn't support 2-way input. I'll send a notification instead and proceed with a safe default — or switch to a telegram channel if you want me to wait for your reply."
@@ -76,16 +76,20 @@ send_file(path="./out.log", channel="eve", caption="build log", mention=["alice"
 - **Don't hand-write `<@id>` in `text`.** Only registered users passed via `mention` actually ping; `@everyone`/`@here`/role mentions are always suppressed for safety.
 - `mention` on a Telegram/ntfy channel is ignored (response carries a `note`).
 
-## `ask` needs the polling session
+## `ask` and multiple sessions
 
-Telegram allows one poller per bot token, so when the user has several Claude Code sessions open, only one of them receives replies. Every session can still send.
+Telegram allows one poller per bot token, so when the user has several Claude Code sessions open, only one of them receives replies. Every session can still send. If the user enabled the broker (`broker.enabled: true`), `ask` also works in the other sessions — the polling session relays the question and the answer (the result then carries `via: "broker"`).
 
-If `ask` returns `error: "polling_not_owned"`, **do not retry** — it will keep failing in this session. The response carries `poll_owner_pid`, the session that *can* ask. Tell the user:
+If `ask` returns `error: "polling_not_owned"`, **do not retry** — it will keep failing in this session: either the broker is off, or no live polling session is there to serve it (the `broker` field then says why). The response carries `poll_owner_pid`, the session that *can* ask. Tell the user:
 "Another Claude Code session owns the Telegram connection (pid N), so I can't wait for a reply here. I can notify you with `send_message` and proceed with a safe default, or you can ask me from that session."
 
 Two related errors mean something different — both are config, not contention, so retrying elsewhere won't help either:
 - `polling_disabled` → `bot.disable_polling: true` on this machine.
 - `telegram_not_configured` → no `bot:` section at all (ntfy-only setup).
+
+With the broker on, two more:
+- `broker_unavailable` → the question could not be handed over (spool not writable). Nothing was posted. Don't retry in this session.
+- `ask_requires_operator_chat` → a brokered `ask` can only go to the operator chat. Use `send_message` for that channel.
 
 ## Channels (routing to different chats/groups)
 
@@ -126,8 +130,8 @@ mcgram discord mention list                                  # list registered m
 - `send_file` size cap **50 MB** for Telegram. ntfy.sh public free tier ~15 MB; self-hosted may be higher; Discord **25 MB**. If a large file fails, suggest the user split it or self-host.
 - `send_message` text cap: **4096 chars** on Telegram/ntfy, **2000 chars** on Discord. Over the cap returns `text_too_long` with the transport's `max` — split or send as a file.
 - Caption max 1024 chars (Telegram limit) — auto-truncated with ellipsis.
-- Max **10 pending reminders**. Max delay **24h**. Reminders **lost on Claude Code shutdown** — don't promise long-term reminders.
-- Max **6 buttons** per `ask`. Use freetext (no `options`) for open-ended answers.
+- Max **10 pending reminders**. Max delay **24h**. Reminders are saved to disk and **survive a restart**: one that came due while mcgram was down fires on the next start, marked late (dropped if more than 24h overdue). Rarely a crash can deliver one twice.
+- Max **6 buttons** per `ask`. Use freetext (no `options`) for open-ended answers. `columns` (1–4) puts several buttons on a row; `multi_select=true` lets the user tick several options and press Done.
 - Rate limit: 20 calls per minute per tool.
 
 ## Error recovery
@@ -148,10 +152,12 @@ mcgram discord mention list                                  # list registered m
 
 ## How `ask` resolves (Telegram only)
 
-User replies by **tapping a button** (when `options` provided) or by **typing a free-text reply**. First reply wins. Timeout → `{source: "timeout", value: ""}`.
+User replies by **tapping a button** (when `options` provided) or by **typing a free-text reply**. First reply wins. Timeout → `{source: "timeout", value: ""}`, and the question is marked `⏱ timed out` in the chat.
+
+With `multi_select=true`, `value` is always a **list**: the ticked labels in option order after Done, `[text]` for a typed reply, `[]` on timeout. Use it for "which of these apply?" questions, e.g. `ask(question="Which envs to deploy?", options=["dev","staging","prod"], multi_select=True, columns=3)`.
 
 Source field tells you HOW they replied:
-- `button` — tapped one of the provided options (value = button label)
+- `button` — tapped one of the provided options (value = button label, or the list of ticked labels)
 - `freetext` — typed a custom reply (value = their text)
 - `timeout` — no reply within the deadline
 
@@ -163,8 +169,8 @@ Every tool call is logged to `~/.mcgram/audit.jsonl` with the `transport` field.
 
 - Don't send raw secrets, passwords, or production credentials.
 - For **ntfy.sh public topics**: assume **anyone with the topic URL can read your messages**. Don't send personally identifiable info or secrets unless the user is on a self-hosted ntfy with auth.
-- Don't schedule reminders longer than 24h — they're in-memory and lost on restart.
-- Don't promise reminders will survive Claude Code shutdown.
+- Don't schedule reminders longer than 24h — the cap rejects them.
+- Don't promise a reminder fires on time if the machine may be off: it is delivered late on the next start, or dropped after 24h.
 - Don't retry `ask` on a ntfy channel after `transport_unsupported`.
 - Don't use very long `ask` timeouts (>5 min) — they freeze the Claude Code session.
 - Don't spam — respect the 20/min rate limit. Batch updates.
