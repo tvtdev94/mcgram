@@ -13,6 +13,8 @@ USAGE:
   mcgram                          start the MCP stdio server (expects MCGRAM_CONFIG)
   mcgram init [--force]           scaffold ~/.mcgram/ + install Claude Code skill
   mcgram doctor                   check config + transport connectivity (sends test pings)
+  mcgram test-send CHANNEL [--text T]  send one test message via the normal send path
+  mcgram test-send --all          ... to every configured channel (exit 1 on any failure)
   mcgram audit [opts]             analyze audit.jsonl (--since, --tool, --rejected, --tail)
   mcgram channel list             list configured channels (both transports)
   mcgram channel add NAME CHAT_ID add a Telegram channel
@@ -44,6 +46,9 @@ def main() -> None:
         if first == "doctor":
             from .cli_doctor import doctor
             sys.exit(doctor())
+        if first == "test-send":
+            from .cli_test_send import main as test_send_main
+            sys.exit(test_send_main(args[1:]))
         if first == "audit":
             from .cli_audit import main as audit_main
             sys.exit(audit_main(args[1:]))
