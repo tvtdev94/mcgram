@@ -44,7 +44,7 @@ class FakeClient:
         return msg
 
     async def edit_message_reply_markup(
-        self, chat_id: int, message_id: int, reply_markup: Any = None
+        self, chat_id: int, message_id: int, reply_markup: Any = None, **kwargs: Any
     ) -> None:
         self.edited.append({"kind": "markup", "message_id": message_id})
 

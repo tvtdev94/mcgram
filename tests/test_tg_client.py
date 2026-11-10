@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 from pathlib import Path
 
 import httpx
 import pytest
 
+from mcgram.ask_registry import AskRegistry
 from mcgram.errors import AuthError, TelegramError
 from mcgram.tg_client import TelegramClient
 
@@ -237,3 +240,34 @@ async def test_get_updates_leaves_flood_wait_to_poll_loop(
         with pytest.raises(TelegramError):
             await c.get_updates(offset=0, timeout=1)
     assert sleeps == []
+
+
+async def test_tap_handling_in_the_poll_loop_never_waits_out_a_flood(
+    httpx_mock, sleeps: list[float]
+) -> None:
+    """A tap is handled inline by the update dispatcher, so sleeping out a 429
+    there would stall getUpdates — and every other operator reply — for up to
+    30s. The keyboard redraw and the callback answer must fail fast instead."""
+    base = "https://api.telegram.org/botT"
+    httpx_mock.add_response(url=f"{base}/sendMessage",
+                            json={"ok": True, "result": {"message_id": 5}})
+    httpx_mock.add_response(url=f"{base}/editMessageReplyMarkup", status_code=429,
+                            json=_flood(20))
+    httpx_mock.add_response(url=f"{base}/answerCallbackQuery", status_code=429,
+                            json=_flood(20))
+    # Cleanup edits when the open ask is cancelled below; not under test.
+    httpx_mock.add_response(url=f"{base}/editMessageText", json={"ok": True, "result": True},
+                            is_optional=True, is_reusable=True)
+    async with TelegramClient("T") as c:
+        reg = AskRegistry()
+        reg.set_answer_hook(c.answer_callback_query)
+        ask = asyncio.create_task(reg.open(c, chat_id=1, question="?", options=["a", "b"],
+                                           timeout_s=30, multi_select=True))
+        while not reg._pending:
+            await asyncio.sleep(0)
+        q_id = next(iter(reg._pending))
+        await reg.handle_update({"callback_query": {"id": "cb", "data": f"{q_id}:0"}})
+        assert sleeps == []
+        ask.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await ask

@@ -245,7 +245,10 @@ class TelegramClient:
         return result if isinstance(result, list) else []
 
     async def answer_callback_query(self, callback_query_id: str) -> bool:
-        await self._call("answerCallbackQuery", data={"callback_query_id": callback_query_id})
+        # Only ever called from the update dispatcher, inside the poll loop: a
+        # flood-wait sleep here would stall getUpdates for every other reply.
+        await self._call("answerCallbackQuery", data={"callback_query_id": callback_query_id},
+                         retry_flood_wait=False)
         return True
 
     async def edit_message_reply_markup(
@@ -253,14 +256,24 @@ class TelegramClient:
         chat_id: int,
         message_id: int,
         reply_markup: dict[str, Any] | None = None,
+        *,
+        retry_flood_wait: bool = True,
     ) -> Any:
+        """`retry_flood_wait=False` for calls made from the poll loop (see `_call`)."""
         data: dict[str, Any] = {"chat_id": chat_id, "message_id": message_id}
         if reply_markup is not None:
             data["reply_markup"] = json.dumps(reply_markup)
-        return await self._call("editMessageReplyMarkup", data=data)
+        return await self._call("editMessageReplyMarkup", data=data,
+                                retry_flood_wait=retry_flood_wait)
 
     async def edit_message_text(
-        self, chat_id: int, message_id: int, text: str, *, parse_mode: str | None = None
+        self,
+        chat_id: int,
+        message_id: int,
+        text: str,
+        *,
+        parse_mode: str | None = None,
+        retry_flood_wait: bool = True,
     ) -> Any:
         data: dict[str, Any] = {
             "chat_id": chat_id,
@@ -269,4 +282,5 @@ class TelegramClient:
         }
         if parse_mode:
             data["parse_mode"] = parse_mode
-        return await self._call("editMessageText", data=data)
+        return await self._call("editMessageText", data=data,
+                                retry_flood_wait=retry_flood_wait)

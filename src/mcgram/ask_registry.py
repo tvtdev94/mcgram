@@ -177,12 +177,14 @@ async def _apply_tap(pending: PendingAsk, idx_str: str) -> None:
         return
     pending.selected ^= {idx}
     try:
+        # Runs inside the poll loop: fail fast on a 429 rather than stall it.
         await pending.client.edit_message_reply_markup(
             pending.chat_id, pending.message_id,
             reply_markup=_build_keyboard(
                 pending.question_id, options, columns=pending.columns,
                 multi_select=True, selected=pending.selected,
             ),
+            retry_flood_wait=False,
         )
     except Exception:
         # The selection is tracked here regardless; only the checkmarks lag.
