@@ -277,6 +277,27 @@ async def test_cancel_request_from_another_session_is_honoured(tmp_path: Path) -
     assert client.sent == []
 
 
+async def test_heartbeat_is_written_on_its_own_cadence_only_while_owning_reminders(
+    tmp_path: Path,
+) -> None:
+    s = _settings(tmp_path)
+    s.broker.enabled, s.broker.poll_interval_s = True, 0.02  # fast watcher ticks
+    sched = _scheduler(s, FakeClient(), durable=True)
+    heartbeats = Spool(s.spool_root, "reminders")
+    sched.start()
+    try:
+        await asyncio.sleep(0.2)
+        assert heartbeats.keys("alive") == set()  # nothing owned, nothing to prove
+        sched.create("later", delay_s=50)
+        await asyncio.sleep(0.1)  # the watcher takes over beating on its next tick
+        [owner] = heartbeats.keys("alive")
+        first = heartbeats.read(owner, "alive")
+        await asyncio.sleep(0.3)  # many ticks, far less than one beat interval
+        assert heartbeats.read(owner, "alive") == first
+    finally:
+        sched.shutdown()
+
+
 async def test_watch_loop_survives_a_failing_tick(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

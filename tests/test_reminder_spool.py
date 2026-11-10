@@ -129,15 +129,18 @@ def test_tampered_records_are_never_listed_or_adopted(tmp_path: Path, tamper: di
 def test_owner_is_judged_by_its_heartbeat_not_only_its_pid(tmp_path: Path, beating: bool) -> None:
     """Windows reuses pids: a dead owner's pid can belong to an unrelated live
     process, and its reminders would then never fire. A silent owner is only
-    taken for dead on a second look, so one stalled tick (or waking from
-    sleep) does not hand a live session's reminders away."""
+    taken for dead once it stayed silent for three beat intervals, so a
+    stalled tick (or waking from sleep) does not hand a live session's
+    reminders away."""
     stranger = _store(tmp_path)
     stranger._pid, stranger._instance = os.getppid(), "feedfacecafebeef"  # alive, not us
     _publish(stranger, "r_0000f00d")
     if not beating:
         Spool(tmp_path, "reminders").sweep(now=time.time() + 600)  # its heartbeat expired
-    store = _store(tmp_path)
+    store = ReminderSpool(Spool(tmp_path, "reminders"), cancel_ttl_s=300, heartbeat_stale_s=1)
     assert store.orphans() == []
+    assert store.orphans() == []  # a quick second look is not enough
+    time.sleep(3 * store.beat_interval_s + 0.05)
     assert [o["rid"] for o in store.orphans()] == ([] if beating else ["r_0000f00d"])
 
 

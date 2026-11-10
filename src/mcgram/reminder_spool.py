@@ -9,9 +9,12 @@ exactly one adopter wins, however many instances race for it.
 
 Ownership is tracked by a per-process random token. An owner counts as alive
 only while its pid runs AND it keeps refreshing its heartbeat
-(`o_<token>.alive`, every watcher tick). The pid alone is not enough: Windows
-reuses pids, and an unrelated process holding a dead owner's pid would keep
-that owner's reminders from ever firing.
+(`o_<token>.alive`). The pid alone is not enough: Windows reuses pids, and an
+unrelated process holding a dead owner's pid would keep that owner's reminders
+from ever firing. An owner beats every `beat_interval_s` (at most a sixth of
+`heartbeat_stale_s`) and only while it holds records; `publish` and `claim`
+beat before writing a record, so a record never names an owner without a
+heartbeat.
 
 A reminder that fired or was cancelled gets a `done` tombstone, created with
 `write_exclusive` and kept as long as the record could live. Nobody fires or
@@ -20,8 +23,11 @@ Windows a concurrent reader makes its unlink fail — cannot fire it twice. A
 cancel from another session is the same tombstone, which is why it reaches the
 owner without the broker and still holds when an adopter turns up hours later.
 
-Delivery is at-least-once only in one window: a process killed after sending a
-reminder but before writing its tombstone fires it again after adoption.
+Delivery is at-least-once in two rare windows: a process killed after sending a
+reminder but before writing its tombstone fires it again after adoption; and an
+owner that passed its pre-fire ownership check and is then frozen (debugger,
+suspended process) for longer than `heartbeat_stale_s` plus the silent-owner
+confirmation can be adopted while frozen, and then both send.
 """
 
 from __future__ import annotations
@@ -46,6 +52,12 @@ INSTANCE = uuid.uuid4().hex[:16]
 #: the record expires and the sweep drops it unfired.
 LATE_GRACE_S = 86400
 
+#: Slowest reminder watcher tick, and the cadence of orphan looks.
+ADOPT_INTERVAL_S = 5.0
+
+#: Upper bound on the heartbeat cadence; a smaller `heartbeat_stale_s` beats faster.
+BEAT_INTERVAL_MAX_S = 10.0
+
 _TOKEN_RE = re.compile(r"[0-9a-f]{1,32}")
 _HEARTBEAT_KIND = "alive"
 _DONE_KIND = "done"
@@ -68,11 +80,18 @@ class ReminderSpool:
         self._tmp_grace_s = tmp_grace_s
         self._pid = os.getpid()
         self._instance = INSTANCE
-        # Owners found silent (pid alive, heartbeat stale) on the last look.
-        self._silent: set[str] = set()
+        #: How often an owner holding records refreshes its heartbeat.
+        self.beat_interval_s = min(BEAT_INTERVAL_MAX_S, heartbeat_stale_s / 6)
+        # A live owner beats within one beat interval plus one watcher tick
+        # (itself at most a beat interval) of waking up; a third interval is
+        # the margin before a silent owner is taken for dead.
+        self._silent_confirm_s = 3 * self.beat_interval_s
+        # Owners found silent (pid alive, heartbeat stale) on the last look:
+        # owner -> (heartbeat `at` then, monotonic time first seen silent).
+        self._silent: dict[str, tuple[Any, float]] = {}
 
     def beat(self) -> bool:
-        """Refresh this owner's heartbeat. Called on every watcher tick."""
+        """Refresh this owner's heartbeat."""
         now = time.time()
         return self._spool.write(f"o_{self._instance}", _HEARTBEAT_KIND, {
             "pid": self._pid, "at": now, "expires_at": now + self._heartbeat_stale_s,
@@ -122,23 +141,29 @@ class ReminderSpool:
         path = self._spool.path_for(rid, _DONE_KIND)
         return path is not None and path.exists()
 
-    def _owner_state(self, rec: dict[str, Any], now: float) -> str:
-        """"alive", "dead" (pid gone), or "silent" (pid runs, heartbeat stale)."""
+    def _owner_state(self, rec: dict[str, Any], now: float) -> tuple[str, Any]:
+        """("alive" | "dead" | "silent", the heartbeat's `at` or None).
+
+        "dead" means the pid is gone; "silent" that it runs but its heartbeat
+        is stale or missing.
+        """
         if rec.get("owner") == self._instance:
-            return "alive"
+            return "alive", None
         pid = rec.get("pid")
         # Our own pid on a record we do not own means a previous process that
         # had this pid — it is gone.
         if not isinstance(pid, int) or pid == self._pid or not _pid_alive(pid):
-            return "dead"
+            return "dead", None
         hb = self._spool.read(f"o_{rec['owner']}", _HEARTBEAT_KIND)
-        expires = hb.get("expires_at") if hb is not None else None
-        if _finite(expires) and expires >= now and hb is not None and hb.get("pid") == pid:
-            return "alive"
-        return "silent"
+        if hb is None:
+            return "silent", None
+        expires = hb.get("expires_at")
+        if _finite(expires) and expires >= now and hb.get("pid") == pid:
+            return "alive", hb.get("at")
+        return "silent", hb.get("at")
 
     def owner_alive(self, rec: dict[str, Any]) -> bool:
-        return self._owner_state(rec, time.time()) == "alive"
+        return self._owner_state(rec, time.time())[0] == "alive"
 
     def _records(self, *, include_done: bool = False) -> list[dict[str, Any]]:
         """Well-formed, unexpired records; finished ones only on request."""
@@ -155,22 +180,29 @@ class ReminderSpool:
         """Records whose owner is gone. Read-only: `claim` takes one over.
 
         A dead pid is enough. A silent owner (pid running, heartbeat stale) must
-        be silent on two looks in a row: right after the machine wakes from
-        sleep every heartbeat is stale, and the owners refresh theirs within a
-        tick — handing their reminders away then would fire them twice.
+        stay silent, without a single beat, from one look to a later look at
+        least `3 * beat_interval_s` after it: right after the machine wakes from
+        sleep every heartbeat is stale, and a live owner refreshes its own
+        within a beat interval plus a watcher tick — handing its reminders away
+        then would fire them twice.
 
         Finished (cancelled) records are included: `claim` is where an orphan
         cancelled while its owner was gone gets dropped.
         """
-        now = time.time()
+        now, mono = time.time(), time.monotonic()
         out: list[dict[str, Any]] = []
-        silent: set[str] = set()
+        silent: dict[str, tuple[Any, float]] = {}
         for rec in self._records(include_done=True):
-            state = self._owner_state(rec, now)
-            if state == "silent":
-                silent.add(rec["owner"])
-            if state == "dead" or (state == "silent" and rec["owner"] in self._silent):
+            state, beat_at = self._owner_state(rec, now)
+            if state == "dead":
                 out.append(rec)
+            elif state == "silent":
+                seen = self._silent.get(rec["owner"])
+                if seen is None or seen[0] != beat_at:  # first look, or it beat since
+                    seen = (beat_at, mono)
+                silent[rec["owner"]] = seen
+                if mono - seen[1] >= self._silent_confirm_s:
+                    out.append(rec)
         self._silent = silent
         return out
 
@@ -191,6 +223,8 @@ class ReminderSpool:
             self.remove_record(rid)
             return None
         mine = {**rec, "pid": self._pid, "owner": self._instance}
+        # Beat first, as in `publish`: an idle process keeps no heartbeat.
+        self.beat()
         if not self._spool.write(rid, "rec", mine):
             # The record still names the old owner. Give the claim back so this
             # generation can be adopted again, instead of stranding it.

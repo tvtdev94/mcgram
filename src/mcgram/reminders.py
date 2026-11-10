@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 
 from .dispatch import require_client, send_text
 from .errors import ConfigError, LimitError
+from .reminder_spool import ADOPT_INTERVAL_S
 
 if TYPE_CHECKING:
     from .config import Destination
@@ -18,10 +19,6 @@ if TYPE_CHECKING:
     from .runtime import AppState
 
 log = logging.getLogger("mcgram.reminders")
-
-#: How often orphaned reminders (owner process gone) are looked for. The first
-#: look happens as soon as `start()` runs, so a restart delivers promptly.
-ADOPT_INTERVAL_S = 5.0
 
 
 def _iso(epoch: float) -> str:
@@ -167,18 +164,27 @@ class ReminderScheduler:
             self._forget(rid)
 
     async def _watch(self) -> None:
-        """Heartbeat and cancels every tick, adoption and sweep on slower cadences.
+        """Cancels every tick; heartbeat, adoption and sweep on slower cadences.
+
+        Orphans are looked for every `ADOPT_INTERVAL_S`, the first look as soon
+        as `start()` runs, so a restart delivers promptly. The heartbeat is kept
+        only while this process holds records, and a tick never exceeds the
+        beat interval, so a beat is at most one tick late.
 
         Every step is synchronous, so cancellation can only land on the sleep —
         never between reading a cancel request and acting on it.
         """
         assert self.store is not None
         cfg = self._settings.broker
-        tick = cfg.poll_interval_s if cfg.enabled else ADOPT_INTERVAL_S
-        next_adopt = next_sweep = 0.0
+        beat_every = self.store.beat_interval_s
+        tick = min(cfg.poll_interval_s if cfg.enabled else ADOPT_INTERVAL_S, beat_every)
+        next_beat = next_adopt = next_sweep = 0.0
         while True:
             try:
-                self.store.beat()
+                now = time.monotonic()
+                if (self._tasks or self._unremoved) and now >= next_beat:
+                    next_beat = now + beat_every
+                    self.store.beat()
                 for rid in list(self._unremoved):
                     if self.store.remove_record(rid):
                         self._unremoved.discard(rid)
@@ -186,7 +192,6 @@ class ReminderScheduler:
                     if self.cancel(rid):
                         self._audit.write({"tool": "cancel_reminder", "status": "ok",
                                            "rid": rid, "via": "spool"})
-                now = time.monotonic()
                 if now >= next_adopt:
                     next_adopt = now + ADOPT_INTERVAL_S
                     self._adopt_orphans()
