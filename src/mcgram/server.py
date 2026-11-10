@@ -34,6 +34,9 @@ from .tools import send_video as tool_send_video
 from .update_dispatcher import UpdateDispatcher
 
 logging.basicConfig(level=logging.INFO, stream=sys.stderr)
+# httpx logs every request URL at INFO, and both the Telegram bot token and the
+# Discord webhook token live in the URL path. Its warnings still come through.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 log = logging.getLogger("mcgram")
 
 SERVER_NAME = "mcgram"

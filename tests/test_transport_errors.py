@@ -88,3 +88,19 @@ def test_from_httpx_handles_empty_message() -> None:
     """httpx errors often stringify to nothing — don't emit a dangling colon."""
     err = TransportError.from_httpx("ntfy", httpx.ConnectError(""))
     assert err.detail == "ConnectError"
+
+
+async def test_request_urls_carrying_the_token_never_reach_the_log(
+    app_state: AppState, httpx_mock, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The bot token sits in every Telegram URL path (the Discord webhook token
+    likewise); the server's INFO logging goes to stderr, which hosts keep."""
+    import logging
+
+    import mcgram.server  # noqa: F401 - installs the server's logging setup
+
+    caplog.set_level(logging.INFO)
+    httpx_mock.add_response(url=TG_SEND, json={"ok": True, "result": {"message_id": 1}})
+    out = await send_message.handle(app_state, text="build passed")
+    assert out["ok"] is True
+    assert TOKEN not in caplog.text
