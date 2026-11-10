@@ -171,7 +171,7 @@ async def send_document(
             dest.ntfy_topic, path, caption=caption, silent=silent,
             title=title, priority=priority, tags=tags,
         )
-        return {"message_id": result.get("id"), "sent_as": _sent_as(path)}
+        return {"message_id": result.get("id"), "sent_as": _sent_as(path, inline_image)}
     if dest.transport == "discord":
         assert state.discord_client is not None
         assert dest.discord_webhook_url is not None
@@ -184,7 +184,7 @@ async def send_document(
             silent=silent,
             mention_user_ids=mention_user_ids,
         )
-        return {"message_id": result.get("id"), "sent_as": _sent_as(path)}
+        return {"message_id": result.get("id"), "sent_as": _sent_as(path, inline_image)}
     assert state.client is not None and dest.chat_id is not None
     out: dict[str, Any] = {}
     if (shown_inline and path.suffix.lower() != _GIF_EXT
@@ -203,9 +203,16 @@ async def send_document(
     return {"message_id": msg.get("message_id"), "sent_as": "document", **out}
 
 
-def _sent_as(path: Path) -> str:
-    """Discord and ntfy render image attachments inline themselves."""
-    return "photo" if is_image(path) else "document"
+def _sent_as(path: Path, inline_image: bool) -> str:
+    """What Telegram would report for the same request.
+
+    Discord and ntfy upload every file as a plain attachment and decide the
+    preview themselves, so the request and the file type are all there is to
+    report. Using Telegram's words keeps `sent_as` one vocabulary everywhere.
+    """
+    if not inline_image or not is_image(path):
+        return "document"
+    return "animation" if path.suffix.lower() == _GIF_EXT else "photo"
 
 
 async def _send_tg_image(

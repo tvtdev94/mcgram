@@ -114,7 +114,7 @@ Send results carry a `message_id`. Pass it to `edit_message(message_id, text, ch
 
 Text longer than the channel's message cap (4096 characters on Telegram/ntfy, 2000 on Discord) is not rejected: `send_message` delivers the full text as a `message.txt` attachment captioned with its beginning, and the result says `delivered_as: "file"`. Only text over the transport's file size cap is refused (`text_too_long`).
 
-`send_file` shows images in the chat: png/jpg/jpeg/webp go to Telegram as photos (up to Telegram's 10 MB photo limit) and gif as an animation; if Telegram refuses the image (for example extreme dimensions) it is resent as a plain document with a `note`. The result reports `sent_as` (`photo`, `animation` or `document`); pass `as_document: true` to always send a plain file on Telegram. Discord and ntfy preview image attachments themselves.
+`send_file` shows images in the chat: png/jpg/jpeg/webp go to Telegram as photos (up to Telegram's 10 MB photo limit) and gif as an animation; if Telegram refuses the image (for example extreme dimensions) it is resent as a plain document with a `note`. The result reports `sent_as` (`photo`, `animation` or `document`); pass `as_document: true` to always send a plain file on Telegram. Discord and ntfy upload every file as an attachment and preview images themselves; there `sent_as` uses the same words for the same request (`animation` for gif, `document` with `as_document: true`).
 
 Telegram and Discord rate limits (HTTP 429) are retried once after the wait the service asks for, when that wait is 30 seconds or less.
 

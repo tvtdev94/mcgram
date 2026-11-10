@@ -344,18 +344,30 @@ async def test_edit_message_over_2000_rejected(discord_state: AppState, httpx_mo
     assert httpx_mock.get_requests() == []
 
 
-async def test_png_attachment_reported_as_photo(
-    discord_state: AppState, httpx_mock, tmp_path: Path
+@pytest.mark.parametrize(
+    ("name", "mime", "as_document", "sent_as"),
+    [
+        ("chart.png", b"image/png", False, "photo"),
+        ("loop.gif", b"image/gif", False, "animation"),
+        ("chart.png", b"image/png", True, "document"),
+    ],
+    ids=["png", "gif", "png-as-document"],
+)
+async def test_image_attachment_reports_how_it_was_sent(
+    discord_state: AppState, httpx_mock, tmp_path: Path,
+    name: str, mime: bytes, as_document: bool, sent_as: str,
 ) -> None:
+    """`sent_as` uses the words Telegram would report for the same request."""
     discord_state.settings.allow_outside_cwd = True
-    p = tmp_path / "chart.png"
+    p = tmp_path / name
     p.write_bytes(b"\x89PNG\x00")
     httpx_mock.add_response(method="POST", json={"id": "903"})
-    out = await send_file.handle(discord_state, path=str(p), channel="eve")
-    assert out["sent_as"] == "photo"
+    out = await send_file.handle(discord_state, path=str(p), channel="eve",
+                                 as_document=as_document)
+    assert out["sent_as"] == sent_as
     # Discord previews an attachment inline from its image content type.
     body = httpx_mock.get_requests()[0].content
-    assert b'filename="chart.png"\r\nContent-Type: image/png' in body
+    assert b'filename="' + name.encode() + b'"\r\nContent-Type: ' + mime in body
 
 
 async def test_send_file_mention_prepends_caption(
