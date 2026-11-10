@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from email.header import decode_header, make_header
 from pathlib import Path
 from typing import Any
 
@@ -13,7 +14,7 @@ from mcgram.config import Settings
 from mcgram.ntfy_client import NtfyClient
 from mcgram.rate_limiter import RateLimiter
 from mcgram.runtime import AppState
-from mcgram.tools import ask, send_file, send_message, send_video
+from mcgram.tools import ask, edit_message, send_file, send_message, send_video
 from mcgram.update_dispatcher import UpdateDispatcher
 
 NTFY_TOPIC = "mcgram-testxyz"
@@ -219,6 +220,75 @@ async def test_send_file_telegram_unaffected_by_ntfy_cap(
     )
     out = await send_file.handle(app_state, path=str(target))
     assert out["ok"] is True
+
+
+# --------------------------------------------------------------------------- #
+# priority / title / tags
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize("tool", ["send_message", "send_file", "send_video"])
+async def test_ntfy_options_reach_headers(
+    tool: str, ntfy_app_state, httpx_mock, tmp_path: Path
+) -> None:
+    vid = tmp_path / "demo.mp4"
+    vid.write_bytes(b"\x00mp4payload")
+    calls = {
+        "send_message": lambda **kw: send_message.handle(ntfy_app_state, text="hi", **kw),
+        "send_file": lambda **kw: send_file.handle(ntfy_app_state, path=str(vid), **kw),
+        "send_video": lambda **kw: send_video.handle(ntfy_app_state, path=str(vid), **kw),
+    }
+    httpx_mock.add_response(url=NTFY_URL, json=_ntfy_ok())
+    out = await calls[tool](priority=4, title="CI", tags=["warning", " rocket "])
+    assert out["ok"] is True
+    assert "note" not in out
+    h = httpx_mock.get_requests()[0].headers
+    assert (h.get("Priority"), h.get("Title"), h.get("Tags")) == ("4", "CI", "warning,rocket")
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "reason"),
+    [
+        ({"priority": 0}, "invalid_priority"),
+        ({"priority": 6}, "invalid_priority"),
+        ({"priority": True}, "invalid_priority"),
+        ({"priority": "5"}, "invalid_priority"),
+        ({"title": 3}, "invalid_title"),
+        ({"tags": "warning"}, "invalid_tags"),
+        ({"tags": ["a,b"]}, "invalid_tags"),
+        ({"tags": [""]}, "invalid_tags"),
+    ],
+)
+async def test_invalid_ntfy_options_rejected(
+    kwargs: dict, reason: str, ntfy_app_state, httpx_mock
+) -> None:
+    out = await send_message.handle(ntfy_app_state, text="hi", **kwargs)
+    assert out["error"] == "invalid_input"
+    assert out["reason"] == reason
+    assert httpx_mock.get_requests() == []
+
+
+async def test_long_text_on_ntfy_goes_as_attachment_with_one_line_caption(
+    ntfy_app_state, httpx_mock
+) -> None:
+    text = "header line\n" + "z" * 5000
+    httpx_mock.add_response(url=NTFY_URL, method="PUT", json=_ntfy_ok())
+    out = await send_message.handle(ntfy_app_state, text=text, priority=5)
+    assert out["delivered_as"] == "file"
+    req = httpx_mock.get_requests()[0]
+    assert req.headers.get("Filename") == "message.txt"
+    assert req.headers.get("Priority") == "5"
+    caption = str(make_header(decode_header(req.headers["Message"])))
+    assert caption.startswith("header line zzz")
+    assert req.content == text.encode("utf-8")
+
+
+async def test_edit_message_on_ntfy_is_unsupported_without_network(
+    ntfy_app_state, httpx_mock
+) -> None:
+    out = await edit_message.handle(ntfy_app_state, message_id="kGWnD1QOQTWv", text="new")
+    assert out["error"] == "transport_unsupported"
+    assert httpx_mock.get_requests() == []
+    assert _audit(ntfy_app_state.audit.path)[-1]["reason"] == "transport_unsupported"
 
 
 async def test_send_message_no_client_returns_transport_unavailable(

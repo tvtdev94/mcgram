@@ -3,10 +3,11 @@
 Telegram-only: ntfy.sh has no 2-way input. Calls on ntfy channels return
 `transport_unsupported` without contacting any backend.
 
-Also requires that THIS process owns the Telegram poll loop. Only the polling
-process receives the operator's tap, so a non-owner would post the question and
-then block until timeout while the answer lands somewhere else. That is worse
-than an error, so `ask` refuses up front — see `_polling_error`.
+Only the process owning the Telegram poll loop receives the operator's tap. A
+non-owner that posted the question itself would block until timeout while the
+answer lands elsewhere — worse than an error. So a non-owner either hands the
+question to the owner through the opt-in broker (`ask_via_broker`), or refuses
+up front — see `_ask_refusal`.
 """
 
 from __future__ import annotations
@@ -14,10 +15,13 @@ from __future__ import annotations
 import time
 from typing import Any
 
+from ..ask_via_broker import ask_via_broker
 from ..errors import ConfigError, RateLimitError, TelegramError, TransportError
 from ..runtime import AppState
+from ._ask_refusal import refusal, refusal_payload
 
 TOOL_NAME = "ask"
+MAX_COLUMNS = 4
 
 
 def schema() -> dict[str, Any]:
@@ -26,7 +30,9 @@ def schema() -> dict[str, Any]:
         "description": (
             "Post a question to a configured Telegram channel and wait for a reply. "
             "Returns {value, source: button|freetext|timeout, question_id}. "
-            "If options provided, posts inline buttons (1 per row). "
+            "If options provided, posts inline buttons (`columns` per row, default 1). "
+            "multi_select=true lets the operator tick several options and press Done; "
+            "value is then a list of the selected labels ([] on timeout). "
             "Blocks the MCP call until reply or timeout — keep timeout_s short. "
             "REQUIRES a telegram channel; ntfy channels are not supported."
         ),
@@ -48,6 +54,18 @@ def schema() -> dict[str, Any]:
                     "type": "string",
                     "description": "Named channel from config (must be telegram)",
                 },
+                "multi_select": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Toggle several options, then Done (requires options)",
+                },
+                "columns": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": MAX_COLUMNS,
+                    "default": 1,
+                    "description": "Buttons per row",
+                },
             },
             "required": ["question"],
         },
@@ -61,9 +79,19 @@ async def handle(
     options: list[str] | None = None,
     timeout_s: int | None = None,
     channel: str | None = None,
+    multi_select: bool = False,
+    columns: int = 1,
 ) -> dict[str, Any]:
     if not question or not isinstance(question, str):
         return {"error": "invalid_input", "reason": "question_required"}
+    if not isinstance(multi_select, bool):
+        return {"error": "invalid_input", "reason": "multi_select_must_be_bool"}
+    if (not isinstance(columns, int) or isinstance(columns, bool)
+            or not 1 <= columns <= MAX_COLUMNS):
+        return {"error": "invalid_input", "reason": "columns_out_of_range",
+                "min": 1, "max": MAX_COLUMNS}
+    if multi_select and not options:
+        return {"error": "invalid_input", "reason": "multi_select_requires_options"}
     limits = state.settings.limits
     if options is not None:
         if not isinstance(options, list) or not all(isinstance(o, str) for o in options):
@@ -103,7 +131,12 @@ async def handle(
         }
 
     if state.ask_registry is None or state.client is None:
-        return _polling_error(state, dest.name)
+        why = refusal(state)
+        if why is not None:
+            return refusal_payload(state, dest.name, why)
+        return await ask_via_broker(state, dest, question=question, options=options,
+                                    timeout_s=effective_timeout,
+                                    multi_select=multi_select, columns=columns)
     assert dest.chat_id is not None
     if not state.rate.try_acquire(TOOL_NAME):
         state.audit.write({"tool": TOOL_NAME, "status": "rejected", "reason": "rate_limit"})
@@ -120,6 +153,8 @@ async def handle(
             question=question,
             options=options,
             timeout_s=effective_timeout,
+            multi_select=multi_select,
+            columns=columns,
         )
     except TransportError as e:
         state.audit.write({
@@ -144,50 +179,3 @@ async def handle(
     })
     result["channel"] = dest.name
     return result
-
-
-def _polling_error(state: AppState, channel: str) -> dict[str, Any]:
-    """Explain why `ask` can't run here — three distinct causes, three messages.
-
-    Returns immediately (no network, no waiting): the caller would otherwise
-    block for the full timeout and then get `source: "timeout"`, which reads as
-    "the operator ignored you" when in truth the question never reached anyone
-    who could answer it.
-    """
-    reason, detail, hint = _polling_error_detail(state)
-    record = {"tool": TOOL_NAME, "status": "rejected",
-              "reason": reason, "channel": channel}
-    if state.poll_owner_pid is not None:
-        record["poll_owner_pid"] = state.poll_owner_pid
-    state.audit.write(record)
-    payload: dict[str, Any] = {
-        "error": reason, "reason": detail, "channel": channel, "hint": hint,
-    }
-    if state.poll_owner_pid is not None:
-        payload["poll_owner_pid"] = state.poll_owner_pid
-    return payload
-
-
-def _polling_error_detail(state: AppState) -> tuple[str, str, str]:
-    if state.client is None:
-        return (
-            "telegram_not_configured",
-            "ask requires a Telegram bot; this instance has no `bot` section in config",
-            "add a `bot:` section to ~/.mcgram/config.yaml, or use send_message over ntfy",
-        )
-    if state.settings.bot is not None and state.settings.bot.disable_polling:
-        return (
-            "polling_disabled",
-            "ask requires Telegram long-polling, disabled here via bot.disable_polling",
-            "set bot.disable_polling = false on a machine that can reach api.telegram.org",
-        )
-    owner = state.poll_owner_pid
-    where = f"another mcgram instance (pid={owner})" if owner else "another mcgram instance"
-    return (
-        "polling_not_owned",
-        f"ask requires the Telegram poll loop, currently owned by {where}. "
-        "Only one process per bot token may poll, so only that instance can "
-        "receive your reply",
-        f"ask from the Claude Code session running {where}, or use send_message here "
-        "(it works in every instance)",
-    )

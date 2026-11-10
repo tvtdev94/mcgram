@@ -9,6 +9,7 @@ from pathlib import Path
 import httpx
 from dotenv import load_dotenv
 
+from .broker_wiring import ASK_NAMESPACE, REMINDER_NAMESPACE, safe_spool
 from .config import DEFAULT_CHANNEL, Settings
 from .discord_client import DiscordClient
 from .errors import AuthError, ConfigError, DiscordError, NtfyError, TelegramError
@@ -213,7 +214,26 @@ async def _run_checks(settings: Settings) -> tuple[int, list[str]]:
         rows.append(_skip("ntfy", "no `ntfy` section in config"))
     if any(ch.transport == "discord" for ch in settings.channels.values()):
         failures += await _check_discord(settings, rows)
+    failures += _check_spool(settings, rows)
     return failures, rows
+
+
+def _check_spool(settings: Settings, rows: list[str]) -> int:
+    """Reminders always persist to the spool; the ask broker uses it when enabled."""
+    namespaces = [REMINDER_NAMESPACE]
+    if settings.broker.enabled:
+        namespaces.append(ASK_NAMESPACE)
+    failures = 0
+    for ns in namespaces:
+        spool, reason = safe_spool(settings, ns)
+        if spool is None:
+            rows.append(_fail(f"spool/{ns}", reason))
+            failures += 1
+        else:
+            rows.append(_ok(f"spool/{ns}", str(spool.dir)))
+    if not settings.broker.enabled:
+        rows.append(_skip("broker", "broker.enabled is false (default)"))
+    return failures
 
 
 def _resolve_config_path() -> Path:

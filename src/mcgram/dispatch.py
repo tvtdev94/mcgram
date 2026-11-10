@@ -1,20 +1,46 @@
 """Transport-aware dispatch helpers.
 
 Tools call these to send to a resolved `Destination` without caring whether
-the underlying transport is Telegram or ntfy.sh.
+the underlying transport is Telegram, ntfy.sh or Discord.
 """
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .config import Destination
-from .errors import ConfigError
+from .errors import ConfigError, LimitError, TelegramError
 from .video_meta import probe_video
 
 if TYPE_CHECKING:
     from .runtime import AppState
+
+# Images Telegram shows inline via sendPhoto, keyed by extension.
+_PHOTO_MIME = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+}
+_GIF_EXT = ".gif"
+# sendPhoto: "The photo must be at most 10 MB in size."
+_TG_PHOTO_MAX_BYTES = 10 * 1024 * 1024
+# Telegram answers a photo it cannot take (bad dimensions, size) with 400/413;
+# those fall back to a plain document. Other errors (auth, flood) do not.
+_PHOTO_REJECT_STATUSES = {400, 413}
+# editMessageCaption: "New caption of the message, 0-1024 characters".
+TG_CAPTION_MAX_CHARS = 1024
+# What Telegram answers when editMessageText targets a media message, whose
+# text lives in its caption.
+_NO_TEXT_TO_EDIT = "there is no text in the message to edit"
+
+
+def is_image(path: Path) -> bool:
+    """True for file types the chat apps preview inline (png/jpg/jpeg/webp/gif)."""
+    suffix = path.suffix.lower()
+    return suffix in _PHOTO_MIME or suffix == _GIF_EXT
 
 
 def require_client(state: AppState, dest: Destination) -> None:
@@ -49,17 +75,22 @@ async def send_text(
     parse_mode: str | None = None,
     thread_id: str | None = None,
     mention_user_ids: list[str] | None = None,
+    title: str | None = None,
+    priority: int | None = None,
+    tags: list[str] | None = None,
 ) -> dict[str, Any]:
     """Dispatch a text message. Returns a dict with `message_id` (str/int).
 
     `thread_id` and `mention_user_ids` are honored only by discord (per-call
-    runtime targets); the other transports ignore them.
+    runtime targets); `title`, `priority` and `tags` only by ntfy. The other
+    transports ignore them.
     """
     require_client(state, dest)
     if dest.transport == "ntfy":
         assert state.ntfy_client is not None and dest.ntfy_topic is not None
         result = await state.ntfy_client.send_message(
             dest.ntfy_topic, text, silent=silent,
+            title=title, priority=priority, tags=tags,
         )
         return {"message_id": result.get("id")}
     if dest.transport == "discord":
@@ -84,6 +115,52 @@ async def send_text(
     return {"message_id": msg.get("message_id")}
 
 
+async def edit_text(
+    state: AppState,
+    dest: Destination,
+    message_id: str,
+    text: str,
+    *,
+    parse_mode: str | None = None,
+    thread_id: str | None = None,
+) -> dict[str, Any]:
+    """Replace the text of a message sent earlier. Telegram and Discord only.
+
+    `message_id` is the value a send returned, as a string; the caller has
+    already checked it is numeric.
+
+    On Telegram a photo, video or file (including a long `send_message`
+    delivered as a file) carries a caption instead of text. Telegram says so
+    when asked to edit its text, and the edit is retried as a caption edit,
+    which caps the text at `TG_CAPTION_MAX_CHARS` (LimitError past it).
+    Discord keeps a message's attachments when only its content is edited.
+    """
+    require_client(state, dest)
+    if dest.transport == "ntfy":
+        raise ConfigError("ntfy does not support editing a sent message")
+    if dest.transport == "discord":
+        assert state.discord_client is not None
+        assert dest.discord_webhook_url is not None
+        result = await state.discord_client.edit_message(
+            dest.discord_webhook_url, message_id, text, thread_id=thread_id,
+        )
+        return {"message_id": result.get("id", message_id)}
+    assert state.client is not None and dest.chat_id is not None
+    try:
+        await state.client.edit_message_text(
+            dest.chat_id, int(message_id), text, parse_mode=parse_mode,
+        )
+    except TelegramError as e:
+        if _NO_TEXT_TO_EDIT not in e.description.lower():
+            raise
+        if len(text) > TG_CAPTION_MAX_CHARS:
+            raise LimitError("caption_too_long") from e
+        await state.client.edit_message_caption(
+            dest.chat_id, int(message_id), text, parse_mode=parse_mode,
+        )
+    return {"message_id": int(message_id)}
+
+
 async def send_document(
     state: AppState,
     dest: Destination,
@@ -93,16 +170,28 @@ async def send_document(
     silent: bool = False,
     thread_id: str | None = None,
     mention_user_ids: list[str] | None = None,
+    title: str | None = None,
+    priority: int | None = None,
+    tags: list[str] | None = None,
+    inline_image: bool = False,
 ) -> dict[str, Any]:
     """Dispatch a file attachment. `thread_id`/`mention_user_ids` are discord-only
-    (see send_text)."""
+    and `title`/`priority`/`tags` ntfy-only (see send_text).
+
+    With `inline_image`, an image goes to Telegram as a photo (GIF as an
+    animation) so it shows in the chat, falling back to a document when
+    Telegram refuses it. Discord and ntfy preview image attachments on their
+    own. The result's `sent_as` says how it went out; `note` explains a fallback.
+    """
     require_client(state, dest)
+    shown_inline = inline_image and is_image(path)
     if dest.transport == "ntfy":
         assert state.ntfy_client is not None and dest.ntfy_topic is not None
         result = await state.ntfy_client.send_file(
             dest.ntfy_topic, path, caption=caption, silent=silent,
+            title=title, priority=priority, tags=tags,
         )
-        return {"message_id": result.get("id")}
+        return {"message_id": result.get("id"), "sent_as": _sent_as(path, inline_image)}
     if dest.transport == "discord":
         assert state.discord_client is not None
         assert dest.discord_webhook_url is not None
@@ -115,12 +204,52 @@ async def send_document(
             silent=silent,
             mention_user_ids=mention_user_ids,
         )
-        return {"message_id": result.get("id")}
+        return {"message_id": result.get("id"), "sent_as": _sent_as(path, inline_image)}
     assert state.client is not None and dest.chat_id is not None
+    out: dict[str, Any] = {}
+    if (shown_inline and path.suffix.lower() != _GIF_EXT
+            and os.path.getsize(path) > _TG_PHOTO_MAX_BYTES):
+        out["note"] = "image is over Telegram's 10 MB photo limit; sent as document"
+    elif shown_inline:
+        try:
+            return await _send_tg_image(state, dest, path, caption, silent)
+        except TelegramError as e:
+            if e.status not in _PHOTO_REJECT_STATUSES:
+                raise
+            out["note"] = f"telegram refused the image inline ({e.description}); sent as document"
     msg = await state.client.send_document(
         dest.chat_id, path, caption=caption, disable_notification=silent,
     )
-    return {"message_id": msg.get("message_id")}
+    return {"message_id": msg.get("message_id"), "sent_as": "document", **out}
+
+
+def _sent_as(path: Path, inline_image: bool) -> str:
+    """What Telegram would report for the same request.
+
+    Discord and ntfy upload every file as a plain attachment and decide the
+    preview themselves, so the request and the file type are all there is to
+    report. Using Telegram's words keeps `sent_as` one vocabulary everywhere.
+    """
+    if not inline_image or not is_image(path):
+        return "document"
+    return "animation" if path.suffix.lower() == _GIF_EXT else "photo"
+
+
+async def _send_tg_image(
+    state: AppState, dest: Destination, path: Path, caption: str | None, silent: bool
+) -> dict[str, Any]:
+    assert state.client is not None and dest.chat_id is not None
+    suffix = path.suffix.lower()
+    if suffix == _GIF_EXT:
+        msg = await state.client.send_animation(
+            dest.chat_id, path, caption=caption, disable_notification=silent,
+        )
+        return {"message_id": msg.get("message_id"), "sent_as": "animation"}
+    msg = await state.client.send_photo(
+        dest.chat_id, path, mime=_PHOTO_MIME[suffix],
+        caption=caption, disable_notification=silent,
+    )
+    return {"message_id": msg.get("message_id"), "sent_as": "photo"}
 
 
 async def send_video_file(
@@ -132,15 +261,20 @@ async def send_video_file(
     silent: bool = False,
     thread_id: str | None = None,
     mention_user_ids: list[str] | None = None,
+    title: str | None = None,
+    priority: int | None = None,
+    tags: list[str] | None = None,
 ) -> dict[str, Any]:
     """Dispatch a video file (Telegram inline player or ntfy mobile inline).
 
-    `thread_id`/`mention_user_ids` are discord-only (see send_text)."""
+    `thread_id`/`mention_user_ids` are discord-only and `title`/`priority`/`tags`
+    ntfy-only (see send_text)."""
     require_client(state, dest)
     if dest.transport == "ntfy":
         assert state.ntfy_client is not None and dest.ntfy_topic is not None
         result = await state.ntfy_client.send_video(
             dest.ntfy_topic, path, caption=caption, silent=silent,
+            title=title, priority=priority, tags=tags,
         )
         return {"message_id": result.get("id")}
     if dest.transport == "discord":

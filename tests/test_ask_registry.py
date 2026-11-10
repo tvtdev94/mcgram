@@ -25,7 +25,7 @@ class FakeClient:
         return msg
 
     async def edit_message_reply_markup(
-        self, chat_id: int, message_id: int, reply_markup: Any = None
+        self, chat_id: int, message_id: int, reply_markup: Any = None, **kwargs: Any
     ) -> None:
         self.edited.append({
             "kind": "markup", "message_id": message_id, "reply_markup": reply_markup,
@@ -39,6 +39,44 @@ class FakeClient:
     async def answer_callback_query(self, callback_query_id: str) -> bool:
         self.answered.append(callback_query_id)
         return True
+
+
+async def test_tap_delivered_before_the_post_returns_still_answers() -> None:
+    """getUpdates and sendMessage are separate requests: the operator's tap can
+    reach the poll loop before sendMessage's own response does. Dropping that
+    tap leaves the question hanging until it times out."""
+    client = FakeClient()
+    reg = AskRegistry()
+    reg.set_answer_hook(client.answer_callback_query)
+    post = client.send_message
+
+    async def post_then_tap_lands_first(chat_id: int, text: str, **kw: Any) -> dict[str, Any]:
+        msg = await post(chat_id, text, **kw)
+        tap = kw["reply_markup"]["inline_keyboard"][1][0]["callback_data"]
+        await reg.handle_update({"callback_query": {"id": "cq1", "data": tap}})
+        return msg
+
+    client.send_message = post_then_tap_lands_first  # type: ignore[method-assign]
+    result = await asyncio.wait_for(
+        reg.open(client, chat_id=1, question="Q?", options=["Yes", "No"], timeout_s=30), 2)
+    assert (result["value"], result["source"]) == ("No", "button")
+
+
+async def test_freetext_sent_while_the_question_is_still_posting_is_not_its_answer() -> None:
+    """Registering early must not widen what a typed reply can answer: the
+    operator cannot have seen the question before it was posted."""
+    client = FakeClient()
+    reg = AskRegistry()
+    post = client.send_message
+
+    async def reply_arrives_during_post(chat_id: int, text: str, **kw: Any) -> dict[str, Any]:
+        await reg.handle_update({"message": {"chat": {"id": 1}, "text": "unrelated",
+                                             "date": int(time.time()) + 60}})
+        return await post(chat_id, text, **kw)
+
+    client.send_message = reply_arrives_during_post  # type: ignore[method-assign]
+    result = await reg.open(client, chat_id=1, question="Q?", options=None, timeout_s=1)
+    assert result["source"] == "timeout"
 
 
 def test_build_keyboard_one_button_per_row() -> None:
@@ -104,8 +142,65 @@ async def test_timeout() -> None:
     result = await reg.open(client, chat_id=1, question="Wait", options=["A", "B"], timeout_s=1)
     assert result["source"] == "timeout"
     assert result["value"] == ""
-    # message edited to show timeout text
-    assert any(e["kind"] == "text" and "timed out" in e["text"] for e in client.edited)
+    # The question says it expired and loses its buttons, so nobody taps a dead ask.
+    assert {"kind": "text", "message_id": 1001, "text": "Wait\n\n⏱ timed out"} in client.edited
+    assert any(e["kind"] == "markup" and e["reply_markup"] is None for e in client.edited)
+
+
+def test_build_keyboard_lays_out_columns_per_row() -> None:
+    kb = _build_keyboard("q_x", ["A", "B", "C"], columns=2)
+    assert kb["inline_keyboard"] == [
+        [{"text": "A", "callback_data": "q_x:0"}, {"text": "B", "callback_data": "q_x:1"}],
+        [{"text": "C", "callback_data": "q_x:2"}],
+    ]
+
+
+async def _tap(reg: AskRegistry, *suffixes: str) -> None:
+    for _ in range(100):
+        if reg.open_count:
+            break
+        await asyncio.sleep(0.01)
+    q_id = next(iter(reg._pending))
+    for n, suffix in enumerate(suffixes):
+        await reg.handle_update({"callback_query": {"id": f"cq{n}", "data": f"{q_id}:{suffix}"}})
+
+
+async def test_multi_select_toggles_and_returns_labels_on_done() -> None:
+    client = FakeClient()
+    reg = AskRegistry()
+    # Tap C, A, then B twice (on, off): the result follows option order, not tap order.
+    drv = asyncio.create_task(_tap(reg, "2", "0", "1", "1", "done"))
+    result = await reg.open(client, chat_id=1, question="Which?", options=["A", "B", "C"],
+                            timeout_s=5, multi_select=True, columns=3)
+    await drv
+    assert (result["value"], result["source"]) == (["A", "C"], "button")
+    sent_rows = client.sent[0]["reply_markup"]["inline_keyboard"]
+    assert [b["text"] for b in sent_rows[0]] == ["A", "B", "C"]
+    [done] = sent_rows[1]
+    assert done["text"] == "Done" and done["callback_data"].endswith(":done")
+    redraws = [e["reply_markup"] for e in client.edited
+               if e["kind"] == "markup" and e["reply_markup"] is not None]
+    assert [b["text"] for b in redraws[1]["inline_keyboard"][0]] == ["✅ A", "B", "✅ C"]
+    assert {"kind": "text", "message_id": 1001,
+            "text": "Which?\n\n✅ Đã chọn: A, C"} in client.edited
+
+
+async def test_multi_select_value_is_always_a_list() -> None:
+    reg = AskRegistry()
+    timed_out = await reg.open(FakeClient(), chat_id=1, question="?", options=["A"],
+                               timeout_s=1, multi_select=True)
+    assert timed_out["value"] == []
+
+    async def reply() -> None:
+        await _tap(reg)  # waits for the question to be open
+        await reg.handle_update({"message": {"chat": {"id": 1}, "text": "neither",
+                                             "date": time.time() + 1}})
+
+    drv = asyncio.create_task(reply())
+    typed = await reg.open(FakeClient(), chat_id=1, question="?", options=["A"],
+                           timeout_s=5, multi_select=True)
+    await drv
+    assert (typed["value"], typed["source"]) == (["neither"], "freetext")
 
 
 async def test_concurrent_asks_resolve_independently() -> None:

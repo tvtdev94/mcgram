@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 from dataclasses import dataclass
@@ -9,7 +10,7 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_validator
 
 from .errors import ConfigError
 
@@ -165,6 +166,26 @@ class AuditConfig(BaseModel):
         return v
 
 
+class BrokerConfig(BaseModel):
+    """Cross-process broker for `ask` and `reminders`. DEFAULT OFF.
+
+    Enabling it lowers the trust boundary of `ask` from "inbound Telegram update
+    from the operator" to "any code running as this uid can write a spool file".
+    Read docs/security-threat-model.md first.
+    """
+
+    enabled: bool = False
+    spool_dir: str | None = None  # None → ~/.mcgram/spool; see Settings.spool_base
+    poll_interval_s: float = Field(0.3, gt=0, le=5)
+    request_ttl_pad_s: int = Field(30, ge=0)
+    answer_ttl_s: int = Field(300, ge=1)
+    cancel_ttl_s: int = Field(300, ge=1)
+    # Must exceed the 25s long-poll plus slack, or a healthy owner looks dead.
+    heartbeat_stale_s: int = Field(90, ge=1)
+    sweep_interval_s: int = Field(60, ge=1)
+    tmp_grace_s: int = Field(300, ge=1)
+
+
 DEFAULT_CHANNEL = "default"
 
 
@@ -201,9 +222,13 @@ class Settings(BaseModel):
     defaults: DefaultsConfig = Field(default_factory=DefaultsConfig)
     limits: LimitsConfig = Field(default_factory=LimitsConfig)
     audit: AuditConfig = Field(default_factory=AuditConfig)
+    broker: BrokerConfig = Field(default_factory=BrokerConfig)
     channels: dict[str, ChannelConfig] = Field(default_factory=dict)
     allow_outside_cwd: bool = False
     api_root: str = "https://api.telegram.org"
+    # The file this was loaded from; keys the per-config spool. Private so a
+    # YAML key cannot point one config at another config's spool.
+    _config_path: Path | None = PrivateAttr(default=None)
 
     @model_validator(mode="after")
     def _check_api_root(self) -> Settings:
@@ -370,6 +395,32 @@ class Settings(BaseModel):
     def lock_path(self) -> Path:
         return self.home_dir / ".lock"
 
+    @property
+    def spool_base(self) -> Path:
+        """Parent of every config's spool, anchored to DEFAULT_HOME — NOT `home_dir`.
+
+        `home_dir` follows `audit.path`, which the config controls outright, so
+        `audit.path: /tmp/...` would put the spool somewhere world-writable and
+        turn answer forgery from a same-uid capability into a machine-wide one.
+        """
+        if self.broker.spool_dir:
+            return Path(self.broker.spool_dir).expanduser()
+        return Path(DEFAULT_HOME).expanduser() / "spool"
+
+    @property
+    def spool_root(self) -> Path:
+        """This config's own spool: `spool_base/<config key>`.
+
+        Spool records name a channel, not a config, and the broker heartbeat has
+        a fixed key. A spool shared between two configs would let one session
+        adopt and send the other's reminders to its own channel of the same
+        name, and let a requester trust the other config's broker heartbeat.
+        Settings built in code rather than loaded fall back to the process's
+        config (MCGRAM_CONFIG or the default path).
+        """
+        path = self._config_path or _resolve_config_path(None)
+        return self.spool_base / _config_key(path)
+
     @classmethod
     def load(cls, path: str | Path | None = None) -> Settings:
         """Load settings from YAML (path arg or MCGRAM_CONFIG env or default)."""
@@ -382,9 +433,17 @@ class Settings(BaseModel):
         except yaml.YAMLError as e:
             raise ConfigError(f"invalid YAML in {resolved}: {e}") from e
         try:
-            return cls(**raw)
+            settings = cls(**raw)
         except Exception as e:
             raise ConfigError(f"invalid config {resolved}: {e}") from e
+        settings._config_path = resolved.resolve()
+        return settings
+
+
+def _config_key(path: Path) -> str:
+    """16-hex id for a config file, the same however the path is spelled."""
+    canonical = os.path.normcase(str(path.resolve()))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
 
 
 def _resolve_config_path(path: str | Path | None) -> Path:

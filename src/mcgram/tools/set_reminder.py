@@ -1,4 +1,4 @@
-"""Tool: set_reminder — schedule an in-process reminder."""
+"""Tool: set_reminder — schedule a reminder (saved to disk, survives restarts)."""
 
 from __future__ import annotations
 
@@ -16,7 +16,8 @@ def schema() -> dict[str, Any]:
         "description": (
             "Schedule a reminder to fire after delay_s seconds on any configured "
             "channel (Telegram, ntfy.sh, or Discord). "
-            "Reminder is lost on process exit (in-memory scheduler). "
+            "Pending reminders are saved to disk and survive a restart; one that "
+            "came due while mcgram was down fires on the next start, marked late. "
             "Returns {reminder_id, fires_at, channel}."
         ),
         "inputSchema": {

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from email.header import decode_header, make_header
 from pathlib import Path
 
 import httpx
@@ -171,14 +172,52 @@ async def test_access_token_sets_bearer_header(httpx_mock) -> None:
     assert httpx_mock.get_requests()[0].headers.get("Authorization") == "Bearer tk_secret"
 
 
-async def test_non_ascii_header_value_is_replaced(httpx_mock) -> None:
-    httpx_mock.add_response(url=URL, method="POST", json=_ntfy_ok())
+async def test_non_ascii_headers_survive_as_rfc2047(httpx_mock, tmp_path: Path) -> None:
+    # ntfy decodes RFC 2047 encoded words in any header; a raw non-ASCII
+    # value cannot go through httpx, and '?' replacement loses the text.
+    p = tmp_path / "a.txt"
+    p.write_bytes(b"data")
+    httpx_mock.add_response(url=URL, method="PUT", json=_ntfy_ok())
     async with NtfyClient() as c:
-        await c.send_message(TOPIC, "x", title="Xin chào 🚀")
-    title = httpx_mock.get_requests()[0].headers.get("Title")
-    assert title is not None
-    # non-ASCII collapsed to '?' — no httpx encoding crash
-    title.encode("ascii")
+        await c.send_file(TOPIC, p, caption="Đã xong\nbước 2 🚀",
+                          title="Lỗi deploy", tags=["cảnh_báo", "rocket"])
+    h = httpx_mock.get_requests()[0].headers
+
+    def decoded(name: str) -> str:
+        return str(make_header(decode_header(h[name])))
+
+    assert decoded("Title") == "Lỗi deploy"
+    assert decoded("Tags") == "cảnh_báo,rocket"
+    assert decoded("Message") == "Đã xong bước 2 🚀"
+
+
+async def test_send_file_carries_title_priority_tags(httpx_mock, tmp_path: Path) -> None:
+    p = tmp_path / "shot.png"
+    p.write_bytes(b"\x89PNG")
+    httpx_mock.add_response(url=URL, method="PUT", json=_ntfy_ok())
+    async with NtfyClient() as c:
+        await c.send_file(TOPIC, p, silent=True, title="Build", priority=5,
+                          tags=["warning", "rocket"])
+    h = httpx_mock.get_requests()[0].headers
+    assert h.get("Title") == "Build"
+    assert h.get("Priority") == "5"  # explicit priority wins over silent
+    assert h.get("Tags") == "warning,rocket"
+    # Extension kept in the filename + image MIME: the apps preview it inline.
+    assert h.get("Filename") == "shot.png"
+    assert h.get("Content-Type") == "image/png"
+
+
+async def test_multiline_caption_sent_as_single_header_line(
+    httpx_mock, tmp_path: Path
+) -> None:
+    # A raw newline in a header value is refused by the HTTP layer (h11
+    # "Illegal header value"), so the caption must be flattened.
+    p = tmp_path / "a.txt"
+    p.write_bytes(b"data")
+    httpx_mock.add_response(url=URL, method="PUT", json=_ntfy_ok())
+    async with NtfyClient() as c:
+        await c.send_file(TOPIC, p, caption="line one\nline two\r\nthree")
+    assert httpx_mock.get_requests()[0].headers.get("Message") == "line one line two three"
 
 
 # Suppress unused-import warning for `httpx`

@@ -17,6 +17,7 @@ from mcp.types import TextContent, Tool
 
 from . import __version__
 from .audit import AuditLog
+from .broker_wiring import build_reminder_store, start_ask_broker
 from .config import Settings
 from .discord_client import DiscordClient
 from .errors import ConfigError, MCGramError
@@ -26,12 +27,16 @@ from .polling import poll_loop
 from .rate_limiter import RateLimiter
 from .runtime import AppState
 from .tg_client import TelegramClient
+from .tools import edit_message as tool_edit_message
 from .tools import send_file as tool_send_file
 from .tools import send_message as tool_send_message
 from .tools import send_video as tool_send_video
 from .update_dispatcher import UpdateDispatcher
 
 logging.basicConfig(level=logging.INFO, stream=sys.stderr)
+# httpx logs every request URL at INFO, and both the Telegram bot token and the
+# Discord webhook token live in the URL path. Its warnings still come through.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 log = logging.getLogger("mcgram")
 
 SERVER_NAME = "mcgram"
@@ -44,7 +49,7 @@ def _load_env_beside_config(settings_path: Path) -> None:
 
 
 def _phase2_tool_modules() -> list:
-    return [tool_send_message, tool_send_file, tool_send_video]
+    return [tool_send_message, tool_send_file, tool_send_video, tool_edit_message]
 
 
 async def _serve(state: AppState) -> None:
@@ -121,10 +126,14 @@ async def _run() -> None:
             discord_client=discord_client,
         )
         _wire_phase3(state)
+        if state.reminders is not None:
+            state.reminders.start()  # reloads saved reminders; overdue ones fire now
+        broker_task = start_ask_broker(state)
         ownership, poll_task = _start_polling(state, settings)
         try:
             await _serve(state)
         finally:
+            await cancel_task(broker_task)
             await cancel_task(poll_task)
             if ownership is not None:
                 ownership.release()
@@ -219,13 +228,13 @@ def _wire_phase3(state: AppState) -> None:
     The ask registry is deliberately NOT wired here: `ask` only works in the
     process that owns the Telegram poll loop, so `PollOwnership` attaches and
     detaches it as ownership changes. Reminders fire over one-way HTTP and are
-    safe in every instance.
+    safe in every instance; they are saved to the spool so a restart keeps them.
     """
     try:
         from .reminders import ReminderScheduler
     except ImportError:
         return
-    state.reminders = ReminderScheduler(state)
+    state.reminders = ReminderScheduler(state, store=build_reminder_store(state.settings))
 
 
 def _shutdown_phase3(state: AppState) -> None:

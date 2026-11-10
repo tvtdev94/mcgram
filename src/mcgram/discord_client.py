@@ -12,7 +12,9 @@ each method rather than stored on the instance.
 from __future__ import annotations
 
 import json
+import logging
 import mimetypes
+from asyncio import sleep as _sleep
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +23,10 @@ import httpx
 from .errors import DiscordError, TransportError
 
 _DEFAULT_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
+# Longest 429 wait honored with an in-call retry; longer waits fail at once.
+_MAX_RETRY_AFTER_S = 30.0
+
+log = logging.getLogger("mcgram.discord")
 
 # SUPPRESS_NOTIFICATIONS message flag — sends without pinging channel members.
 _FLAG_SUPPRESS_NOTIFICATIONS = 4096
@@ -30,6 +36,10 @@ _FLAG_SUPPRESS_NOTIFICATIONS = 4096
 _FRIENDLY_CODES: dict[int, str] = {
     10015: "webhook does not exist or was deleted — check the URL in ~/.mcgram/.env",
     10003: "thread_id is invalid, or the thread is not in this webhook's channel",
+    10008: (
+        "message not found — wrong message_id, deleted, not sent by this webhook, "
+        "or it lives in a thread (pass thread_id)"
+    ),
     220003: (
         "cannot create a thread in a text channel via webhook (forum channels only) — "
         "pass the thread_id of an existing thread instead"
@@ -150,19 +160,26 @@ class DiscordClient:
         data: dict[str, Any] | None = None,
         files: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        """Send one request; on a 429 wait the server's `retry_after` and retry
+        once, unless the wait exceeds `_MAX_RETRY_AFTER_S`. Bodies are bytes or
+        JSON (never open file handles), so a retry resends them unchanged."""
         if self._client is None:
             raise RuntimeError("DiscordClient used outside `async with` context")
-        try:
-            resp = await self._client.request(
-                method, url, json=json_body, data=data, files=files
-            )
-        except httpx.HTTPError as e:
-            # The webhook token is the last path segment — scrub it, the error
-            # message (and the audit line built from it) must not carry it.
-            raise TransportError.from_httpx(
-                "discord", e, url.path.rsplit("/", 1)[-1]
-            ) from e
-        return self._handle(resp)
+        retried = False
+        while True:
+            try:
+                resp = await self._client.request(
+                    method, url, json=json_body, data=data, files=files
+                )
+            except httpx.HTTPError as e:
+                raise TransportError.from_httpx("discord", e, *_url_secrets(url)) from e
+            wait = _retry_after_s(resp)
+            if wait is not None and not retried and wait <= _MAX_RETRY_AFTER_S:
+                log.warning("discord: rate limited, retrying once after %.1fs", wait)
+                retried = True
+                await _sleep(wait)
+                continue
+            return self._handle(resp)
 
     async def send_message(
         self,
@@ -235,6 +252,28 @@ class DiscordClient:
             mention_user_ids=mention_user_ids,
         )
 
+    async def edit_message(
+        self,
+        webhook_url: str,
+        message_id: str,
+        content: str,
+        *,
+        thread_id: str | None = None,
+    ) -> dict[str, Any]:
+        """PATCH the text of a message this webhook sent. Returns the message.
+
+        Mentions stay suppressed (`allowed_mentions.parse = []`): an edit never
+        pings anyone, so a progress update cannot turn into a notification storm.
+        """
+        if not message_id.isdigit():
+            raise ValueError("discord message_id must be a numeric snowflake")
+        base = httpx.URL(webhook_url)
+        url = base.copy_with(path=f"{base.path.rstrip('/')}/messages/{message_id}")
+        if thread_id is not None:
+            url = url.copy_merge_params({"thread_id": thread_id})
+        payload = {"content": content, "allowed_mentions": {"parse": []}}
+        return await self._request("PATCH", url, json_body=payload)
+
     async def health(self, webhook_url: str) -> dict[str, Any] | None:
         """GET the webhook URL. Return `{name, channel_id, guild_id}` on 200,
         or None on 401/404 (so callers decide how to present the failure)."""
@@ -250,6 +289,35 @@ class DiscordClient:
             except ValueError:
                 return None
         return None
+
+
+def _retry_after_s(resp: httpx.Response) -> float | None:
+    """Seconds to wait from a 429 body (`retry_after`), else None."""
+    if resp.status_code != 429:
+        return None
+    try:
+        body = resp.json()
+    except ValueError:
+        return None
+    raw = body.get("retry_after") if isinstance(body, dict) else None
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)) or raw < 0:
+        return None
+    return float(raw)
+
+
+def _url_secrets(url: httpx.URL) -> list[str]:
+    """The webhook token: the path segment right after the webhook ID.
+
+    Scrubbed from transport errors — the error message (and the audit line built
+    from it) must not carry it. An edit URL ends in `/messages/<id>`, so the
+    token is not always the last segment.
+    """
+    parts = url.path.split("/")
+    if "webhooks" in parts:
+        i = parts.index("webhooks")
+        if i + 2 < len(parts):
+            return [parts[i + 2]]
+    return [parts[-1]]
 
 
 def resolve_mentions(

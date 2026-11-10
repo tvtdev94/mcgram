@@ -31,15 +31,24 @@ src/mcgram/
 ├── rate_limiter.py         # per-tool token bucket
 ├── runtime.py              # AppState dataclass
 │
-├── ask_registry.py         # PendingAsk + button/freetext/timeout resolver (Telegram only)
-├── reminders.py            # in-process asyncio.Task scheduler
+├── ask_registry.py         # PendingAsk + button/multi-select/freetext/timeout resolver
+├── reminders.py            # asyncio.Task scheduler; saves/reloads/adopts via reminder_spool
 ├── skill_installer.py      # bundled Claude skill installer
+│
+├── spool.py                # atomic JSON records under ~/.mcgram/spool/<config-id>/<namespace>/, TTL sweep
+├── spool_safety.py         # spool dir probe: no symlinks, owned by us, mode 0700 (POSIX)
+├── ask_broker.py           # broker, requester side: heartbeat check, request, wait for answer
+├── ask_server.py           # broker, owner side: claim requests, serve via AskRegistry.open
+├── ask_via_broker.py       # `ask` from a non-polling session (never touches Telegram)
+├── broker_wiring.py        # boot wiring: ask broker supervisor + reminder store
+├── reminder_spool.py       # reminder records on disk: publish, list, cancel, adopt orphans
 │
 ├── tools/
 │   ├── send_message.py
 │   ├── send_file.py
 │   ├── send_video.py
 │   ├── ask.py
+│   ├── _ask_refusal.py     # why `ask` can't run here (fail-fast refusals)
 │   ├── set_reminder.py
 │   ├── cancel_reminder.py
 │   └── list_reminders.py
@@ -49,7 +58,8 @@ src/mcgram/
     └── skill/SKILL.md
 ```
 
-Every module is < 200 LOC.
+Most modules stay under 200 lines; a handful (`config.py` and
+`cli_channel.py` are the largest) run longer.
 
 ## Transports
 
@@ -120,7 +130,7 @@ sequenceDiagram
 
     CC->>SRV: shutdown
     SRV->>POLL: task.cancel()
-    SRV->>SRV: reminders.shutdown() (cancel all)
+    SRV->>SRV: reminders.shutdown() (cancel tasks; saved records stay on disk)
     SRV-->>CC: stdout closes
 ```
 
@@ -131,7 +141,7 @@ sequenceDiagram
 3. `AskRegistry.open()` posts the question with inline keyboard, registers a `PendingAsk` keyed by `question_id`, awaits its `asyncio.Future` with `asyncio.wait_for(timeout_s)`
 4. Operator taps a button → Telegram sends `callback_query` → polling loop receives it → `from_operator` filter passes (chat matches `operator_chat_id`) → dispatcher calls `AskRegistry.handle_update`
 5. Handler looks up `q_<id>`, calls `future.set_result((value, "button"))`, sends `answerCallbackQuery` to clear the spinner
-6. `asyncio.wait_for` resolves, registry edits the message to strip the keyboard, returns `{value, source: "button", question_id}`
+6. `asyncio.wait_for` resolves, registry edits the message to strip the keyboard, returns `{value, source: "button", question_id}`. On timeout the message gets `⏱ timed out` and also loses its keyboard. With `multi_select`, taps toggle a ✅ and redraw the keyboard; the future resolves only on **Done**, and `value` is the list of selected labels. `columns` (1–4) sets the buttons per row.
 7. Audit log gets `{tool:"ask", status:"ok", source:"button", ms_to_resolve}`
 8. Claude Code receives the structured response
 
@@ -167,7 +177,7 @@ So `~/.mcgram/.lock` guards **the poll loop**, not the process. Before v0.3.0 it
 `poll_ownership.PollOwnership` owns this:
 
 - **Acquire on start.** Won → full mode. Lost → send-only degraded mode; the server still boots and serves.
-- **`ask` is gated on ownership.** The `AskRegistry` is attached to `AppState` only while this process polls. A non-owner returns `polling_not_owned` (with the owning pid) *immediately*, because the operator's reply is delivered to the polling process — waiting could only end in a `timeout` result that misreports an unanswerable question as an ignored one.
+- **`ask` is gated on ownership.** The `AskRegistry` is attached to `AppState` only while this process polls. Without the broker (the default), a non-owner returns `polling_not_owned` (with the owning pid) *immediately*, because the operator's reply is delivered to the polling process — waiting could only end in a `timeout` result that misreports an unanswerable question as an ignored one. With the broker, the non-owner hands the question to the owner instead — and still fails fast when no live owner is there to serve it (see [Ask broker](#ask-broker)).
 - **Takeover.** A degraded instance re-checks every 30s (`MCGRAM_POLL_RETRY_S`), so it picks up polling when the owner exits — including `kill -9`, where the stale lock is reclaimed by PID liveness check.
 - **No lock when there's nothing to poll.** ntfy-only, Discord-only, or `bot.disable_polling: true` instances skip the lock entirely; taking it would starve a real Telegram instance.
 
@@ -179,9 +189,45 @@ Discord channels do not affect polling because Discord is one-way only. A deploy
 
 Several processes share one `audit.jsonl`. Appends use explicit `O_APPEND` so the kernel resolves the offset at write time and lines can't clobber each other. Rotation and retention pruning rewrite files, so they take a short cross-process lock (`audit.jsonl.rotate.lock`); a loser skips the attempt rather than racing the `.jsonl → .1 → .2 → .3` renames, and a lock left by a killed process is reclaimed after 60s.
 
+## Ask broker
+
+Opt-in (`broker.enabled: false` by default — read the
+[threat model](security-threat-model.md#broker-spool) first). It lets a session
+that does not poll Telegram use `ask`. The design is **owner-does-everything**:
+the non-owner never talks to Telegram. It writes a request file and waits, and
+the polling session serves the request through the unchanged
+`AskRegistry.open()`, so a brokered ask is an ordinary pending ask there.
+
+```
+~/.mcgram/spool/<config-id>/asks/
+├── u0.heartbeat.json   owner, every min(10s, heartbeat_stale_s/6): {pid, at, protocol, expires_at}
+├── q_x.request.json    requester: {question, options, multi_select, columns,
+│                        chat_id, timeout_s, requester_pid, expires_at}
+├── q_x.taken.json      owner, write_exclusive (O_EXCL) — a request is served once
+└── q_x.answer.json     owner: {value, source, answered_by_pid, expires_at}
+```
+
+Requester (`ask_via_broker`):
+1. Is the heartbeat fresh (< `heartbeat_stale_s`), the same protocol, and its pid alive? If not, return `polling_not_owned` with a `broker` reason right away. Nothing is posted or written.
+2. Only `operator_chat_id` can answer (the poll loop drops other chats), so any other channel returns `ask_requires_operator_chat`.
+3. Write the request (`write_exclusive`). If the write fails, return `broker_unavailable` before anything is posted.
+4. Poll for the answer every `poll_interval_s`, with one final read after the deadline. Reject answers whose `answered_by_pid` did not hold the poll lock at some point during the wait.
+5. Always remove the request and answer files. The owner's `taken` claim stays until it expires with the request (the sweep drops it), so a request whose file could not be deleted — on Windows a concurrent reader makes the unlink fail — is never served twice. An owner-side failure (`rate_limited`, `telegram_error`, `cancelled`, …) is returned as an error, never as a timeout.
+
+Owner (`broker_wiring.serve_while_owner`): a supervisor task watches `state.ask_registry` and runs an `AskServer` exactly while this process holds the poll lock. On demotion or shutdown it first cancels the requests in flight: each answers `cancelled` while the poll lock is still held (shutdown stops the broker before it releases the lock), and the posted question is marked stopped and loses its buttons. Then it withdraws its heartbeat, so requesters fail fast instead of waiting out `heartbeat_stale_s`. The server claims each request with `taken`, spends the **owner's** rate-limit budget (one bot token, one budget), and writes an answer on every path. Serving happens in a background task, never inside the update dispatcher. The same supervisor sweeps expired records while not owning, so cleanup also runs where nobody polls.
+
 ## Reminder scheduler
 
-Pure `asyncio.create_task(asyncio.sleep(delay) → send_message(⏰ text))`. Stored in two parallel dicts (`_tasks`, `_meta`) keyed by `r_<hex>`. On shutdown all tasks are cancelled — fires-in-flight catch `CancelledError` and emit a `_reminder_fire status:cancelled` audit line. State is in-process only; no SQLite, no persistence.
+`asyncio.create_task(asyncio.sleep(delay) → send_text(⏰ text))`, tracked in two dicts (`_tasks`, `_meta`) keyed by `r_<hex>`. Delivery goes through `dispatch.send_text`, so any transport works.
+
+**Durable — independent of `broker.enabled`.** Each pending reminder is also saved as `~/.mcgram/spool/<config-id>/reminders/r_x.rec.json` (`reminder_spool`), with the owner's pid and a per-process instance token. It is removed when the reminder fires or is cancelled. Shutdown cancels the tasks but **keeps** the records. Every instance runs a watch task that does three things:
+
+- **Owner liveness**: an owner counts as alive only while its pid runs **and** its heartbeat `o_<token>.alive.json` is fresher than `heartbeat_stale_s` (refreshed every `min(10 s, heartbeat_stale_s/6)`, only while the process holds reminders). A reused pid alone never keeps a dead owner's reminders hostage. A silent owner (pid alive, heartbeat stale) is adopted only after its heartbeat has stayed unchanged for 3 beat intervals of the adopter's own clock (30 s by default); a dead pid is adopted at the next look, and an owner re-checks that it still owns a reminder right before firing (audit `_reminder_fire` status `skipped` otherwise).
+- **Adopt orphans** (on start, then every 5s): a record whose owner is not alive gets claimed with `write_exclusive` on `claim<dead-owner-token>`, so exactly one instance wins each generation. The winner rewrites the record as its own and schedules it. Overdue reminders fire at once, with a late note. Reminders cancelled while their owner was down are dropped, not fired. Adopted reminders have their own bound of `reminder_max_pending`, separate from the cap on reminders this process created (so adopting never blocks `set_reminder` here); the delay/text caps apply too. Adoption and skips channels this instance cannot deliver to.
+- **Tombstones**: a fired or cancelled reminder gets `r_x.done.json`, created with `write_exclusive` **before** the record is deleted. No instance fires or adopts a reminder that has one, and the owner retries a failed record delete every tick (on Windows a concurrent reader can make the unlink fail). `cancel_reminder` from any session — broker on or off — writes the tombstone, so the cancel reaches whoever owns or later adopts the reminder. It lives until the record's own expiry.
+- **Sweep** expired records. A record expires 24h after its due time, so a reminder that came due during a longer outage is dropped unfired.
+
+Delivery is at most once, except when a process is killed between sending and writing the tombstone; the adopter then fires it again. `list_reminders` also shows other sessions' pending records, with `local`, `owner_pid`, `owner_alive`, whenever the reminder store is usable (broker on or off). Fired and cancelled reminders are hidden.
 
 ## What lives outside this repo
 
@@ -189,5 +235,6 @@ Pure `asyncio.create_task(asyncio.sleep(delay) → send_message(⏰ text))`. Sto
 - `~/.mcgram/.env` — bot token + Discord webhook URLs (credentials only; never version-controlled)
   - Format: `MCGRAM_BOT_TOKEN=<token>` + `DISCORD_<CHANNEL_NAME>=<webhook_url>` (env var names are arbitrary, set via `mcgram channel add-discord`)
 - `~/.mcgram/.lock` — single-instance PID file
+- `~/.mcgram/spool/<config-id>/` — `reminders/` (pending reminders, always) and `asks/` (only with `broker.enabled`); dirs 0700, files 0600 on POSIX. `<config-id>` is the first 16 hex of the SHA-256 of the resolved config file path, so sessions on different configs (`MCGRAM_CONFIG`) never share reminders or a broker. Anchored to the home directory, not to `audit.path`; `broker.spool_dir` replaces `~/.mcgram/spool` (the `<config-id>` level stays). Local disk only — NFS/SMB shares are unsupported
 - `~/.mcgram/audit.jsonl[.1..3]` — append-only audit log + rotated backups (redacted if `redact_text: true`)
 - `~/.claude/skills/mcgram/SKILL.md` — companion skill, installed by `mcgram init`

@@ -10,7 +10,7 @@
 [![PyPI](https://img.shields.io/pypi/v/mcgram.svg)](https://pypi.org/project/mcgram/)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/tvtdev94/mcgram/blob/main/LICENSE)
-[![Tests](https://img.shields.io/badge/tests-366%20passing-brightgreen.svg)](#)
+[![Tests](https://img.shields.io/badge/tests-611%20passing-brightgreen.svg)](#)
 [![Coverage](https://img.shields.io/badge/coverage-85%25-brightgreen.svg)](#)
 
 <img src="https://raw.githubusercontent.com/tvtdev94/mcgram/main/docs/images/hero.png" alt="mcgram hero" width="720" />
@@ -95,25 +95,36 @@ mcgram doctor    # ✅ get_me OK, ✅ test message delivered
 
 Declare both `ntfy:` and `bot:` in config — each named channel picks its own transport.
 
-## The 7 tools
+## The 8 tools
 
 | Tool | Telegram | ntfy.sh | Discord | When to use |
 |---|:---:|:---:|:---:|---|
 | **`send_message`** | ✅ | ✅ | ✅ | Notify on completion / send a status update |
-| **`send_file`** | ✅ | ✅ | ✅ | Send logs, screenshots, generated artifacts |
+| **`edit_message`** | ✅ | ❌ | ✅ | Update one message in place (live progress) instead of sending many |
+| **`send_file`** | ✅ | ✅ | ✅ | Send logs, screenshots (shown inline), generated artifacts |
 | **`send_video`** | ✅ | ✅ | ✅ | Send a video that **plays in-chat** (mp4/mov/mkv/webm/m4v) |
-| **`ask`** | ✅ | ❌ | ❌ | Question with inline buttons OR freetext, blocks until reply. Telegram-only, and only in the polling session |
-| **`set_reminder`** | ✅ | ✅ | ✅ | Schedule an in-process reminder (per-session; lost on restart) |
+| **`ask`** | ✅ | ❌ | ❌ | Question with inline buttons (single or `multi_select`, `columns` per row) OR freetext, blocks until reply. Telegram-only; other sessions can ask through the opt-in broker |
+| **`set_reminder`** | ✅ | ✅ | ✅ | Schedule a reminder — saved to disk, survives a restart |
 | **`cancel_reminder`** | — | — | — | Cancel a pending reminder |
 | **`list_reminders`** | — | — | — | List currently pending reminders |
 
-ntfy.sh and Discord have no 2-way input, so `ask` returns `transport_unsupported` on those channels — and `polling_not_owned` in a Telegram session that isn't the one polling ([why](#multiple-claude-code-sessions)). The companion [Claude Code skill](https://github.com/tvtdev94/mcgram/blob/main/src/mcgram/data/skill/SKILL.md) (installed by `mcgram init`) teaches Claude when to call which tool — both **English** and **Vietnamese** trigger phrases are recognized.
+ntfy.sh and Discord have no 2-way input, so `ask` returns `transport_unsupported` on those channels — and `polling_not_owned` in a Telegram session that isn't the one polling, unless the broker is on and the polling session is alive ([why](#multiple-claude-code-sessions)). A question that times out is marked `⏱ timed out` in the chat and loses its buttons. The companion [Claude Code skill](https://github.com/tvtdev94/mcgram/blob/main/src/mcgram/data/skill/SKILL.md) (installed by `mcgram init`) teaches Claude when to call which tool — both **English** and **Vietnamese** trigger phrases are recognized.
+
+Send results carry a `message_id`. Pass it to `edit_message(message_id, text, channel?, thread_id?, parse_mode?)` to replace the text — Telegram `editMessageText`, Discord webhook message edit. On a Telegram photo, video or file (including a long `send_message` delivered as a file) the caption is edited instead (`editMessageCaption`, max 1024 characters, `caption_too_long` past that); on Discord the attachments stay. Edits never notify or ping anyone; ntfy cannot edit and answers `transport_unsupported`.
+
+Text longer than the channel's message cap (4096 characters on Telegram/ntfy, 2000 on Discord) is not rejected: `send_message` delivers the full text as a `message.txt` attachment captioned with its beginning, and the result says `delivered_as: "file"`. Only text over the transport's file size cap is refused (`text_too_long`).
+
+`send_file` shows images in the chat: png/jpg/jpeg/webp go to Telegram as photos (up to Telegram's 10 MB photo limit) and gif as an animation; if Telegram refuses the image (for example extreme dimensions) it is resent as a plain document with a `note`. The result reports `sent_as` (`photo`, `animation` or `document`); pass `as_document: true` to always send a plain file on Telegram. Discord and ntfy upload every file as an attachment and preview images themselves; there `sent_as` uses the same words for the same request (`animation` for gif, `document` with `as_document: true`).
+
+Telegram and Discord rate limits (HTTP 429) are retried once after the wait the service asks for, when that wait is 30 seconds or less.
 
 On Telegram, `send_video` reads the video's width, height and duration with `ffprobe` (from ffmpeg) when it is installed and sends them along. Telegram does not size uploads over about 10 MB itself, so without ffprobe a large portrait video shows squashed.
 
 Discord `send_message` / `send_file` / `send_video` accept an optional `thread_id` to post into an existing thread. Discord has no default channel — always name it: `send_message(text="…", channel="eve")`.
 
-They also accept an optional `mention=["alice"]` to **@ping** registered users — e.g. `send_message(text="deploy done", channel="eve", mention=["alice"])`. Names are registered with `mcgram discord mention add`. Only listed users are pinged; `@everyone`/`@here`/roles are always suppressed. Keep Discord messages short and direct — the content cap is **2000 characters**.
+They also accept an optional `mention=["alice"]` to **@ping** registered users — e.g. `send_message(text="deploy done", channel="eve", mention=["alice"])`. Names are registered with `mcgram discord mention add`. Only listed users are pinged; `@everyone`/`@here`/roles are always suppressed. Keep Discord messages short and direct — the content cap is **2000 characters** (longer text goes out as `message.txt`).
+
+On ntfy channels, `send_message` / `send_file` / `send_video` also take `priority` (1 = min … 5 = max/urgent, overrides `silent`), `title` and `tags` (a list, e.g. `["warning", "rocket"]` — emoji shortcodes render as emoji). Telegram and Discord ignore them and say so in the result's `note`. Example: `send_message(text="prod down", channel="alerts", priority=5, title="Pager", tags=["rotating_light"])`.
 
 ## Channels
 
@@ -139,6 +150,8 @@ Then in Claude Code: *"send the failing log to the alerts channel"* → `send_fi
 mcgram                          # MCP stdio server (Claude Code calls this)
 mcgram init [--force]           # scaffold ~/.mcgram/ + skill + auto-register MCP (generates ntfy topic)
 mcgram doctor                   # config + connectivity check (per-transport)
+mcgram test-send NAME [--text T] # send one test message through the normal send path
+mcgram test-send --all          # ...to every configured channel; exit 1 if any send fails
 mcgram audit [opts]             # analyze audit.jsonl: --since 1h, --tool ask, --rejected, --tail
 mcgram channel <action>         # list | add NAME CHAT_ID | add-ntfy NAME [--topic T] | add-discord NAME [--webhook U] | remove NAME
 mcgram discord mention <action> # list | add NAME USER_ID | remove NAME   (Discord @mention registry)
@@ -198,6 +211,10 @@ audit:
   timezone: UTC
 
 allow_outside_cwd: false           # send_file restricted to CWD by default
+
+broker:                            # opt-in: `ask` from every session — read the threat model first
+  enabled: false                   # question/answer text sits in ~/.mcgram/spool/ while open
+                                   # (0600, short TTL); audit.redact_text does not apply there
 ```
 
 ## Security model
@@ -239,16 +256,28 @@ Sample lines:
 Run as many sessions as you like — each spawns its own `mcgram`, and all of them
 work. One caveat, and it's a Telegram rule, not a mcgram one: `getUpdates`
 accepts a single client per bot token. So exactly one instance polls (first to
-start wins) and the rest run **send-only**:
+start wins). By default only that session can `ask`.
+
+Opt in with `broker.enabled: true` and every session can `ask`: the
+non-polling session writes the question to a small file spool in
+`~/.mcgram/spool/`, and the polling session posts it and relays your answer
+back.
 
 | | Polling instance | Other instances |
 |---|:---:|:---:|
 | `send_message` / `send_file` / `send_video` | ✅ | ✅ |
-| `set_reminder` / `cancel_reminder` / `list_reminders` | ✅ | ✅ |
-| `ask` | ✅ | ❌ `polling_not_owned` |
+| `set_reminder` / `cancel_reminder` / `list_reminders` | ✅ | ✅ (other sessions' reminders listed and cancellable, broker or not) |
+| `ask` | ✅ | ✅ with broker, ❌ `polling_not_owned` without |
 
-`ask` fails **immediately** in a send-only instance (with the polling pid, so
-you know which session to ask from) — it never blocks on a timeout it can't win.
+The broker is **off by default** because it changes the trust boundary of
+`ask`: any process running as your user can write an answer file. Read
+[docs/security-threat-model.md](https://github.com/tvtdev94/mcgram/blob/main/docs/security-threat-model.md#broker-spool)
+before enabling it.
+
+Without the broker, `ask` fails **immediately** in a send-only instance (with
+the polling pid, so you know which session to ask from) — it never blocks on a
+timeout it can't win. With the broker it still fails fast when no live polling
+session is there to serve the question.
 
 Ownership moves on its own: close the polling session and another picks it up
 within ~30s, no restart needed. Same after a crash — the stale lock is reclaimed.
@@ -259,9 +288,13 @@ Rarely what you want.
 
 ## Known limitations
 
-- **Reminders are per-session** — each instance keeps its own in-memory
-  schedule. `list_reminders` in one session won't show reminders set in
-  another, and closing that session drops them. Restart = lost.
+- **Reminders survive restarts** — pending reminders are saved in
+  `~/.mcgram/spool/<config-id>/reminders/` (one directory per config file). When the session that set one stops, the next
+  running (or restarted) mcgram takes it over, and one that came due in the
+  meantime fires right away, marked late. A reminder more than 24h overdue is
+  dropped. Only a crash in the instant between sending and recording it as
+  sent can deliver one twice. `list_reminders` and `cancel_reminder` reach
+  every session's reminders, broker or not.
 - **`ask` blocks the MCP call** — keep timeouts short or Claude waits idle.
 - **`ask` is Telegram-only** — ntfy.sh has no 2-way input. On ntfy channels, `ask` returns `transport_unsupported` without contacting the network.
 - **ntfy.sh public topics are URL-discoverable** — anyone with the topic name can subscribe. mcgram generates 64-bit-entropy topics, but **don't send secrets / PII** unless you self-host ntfy with auth.
@@ -276,14 +309,15 @@ Full module map, lifecycle diagram, and data flow: [docs/architecture.md](https:
 
 ```
 src/mcgram/
-├── cli.py · cli_init · cli_doctor · cli_audit · cli_channel · skill_installer
+├── cli.py · cli_init · cli_doctor · cli_audit · cli_channel · cli_test_send · skill_installer
 ├── config · errors · audit · lock · rate_limiter
 ├── tg_client · ntfy_client · dispatch · update_dispatcher · polling · server · runtime
 ├── poll_ownership · ask_registry · reminders
-└── tools/  send_message · send_file · send_video · ask · set_reminder · cancel_reminder · list_reminders
+├── spool · spool_safety · ask_broker · ask_server · ask_via_broker · broker_wiring · reminder_spool
+└── tools/  send_message · edit_message · send_file · send_video · ask · set_reminder · cancel_reminder · list_reminders
 ```
 
-Small focused modules (most <200 LOC, largest ~400), 361 tests, ruff clean, py3.11/3.12 × ubuntu/windows in CI.
+Small focused modules (most <200 LOC, largest ~400), 611 tests, ruff clean, py3.11/3.12 × ubuntu/windows in CI.
 
 ## Update / uninstall
 

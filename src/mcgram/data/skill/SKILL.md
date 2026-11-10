@@ -16,7 +16,9 @@ Use this skill when the user says: "báo telegram khi xong", "tell me on Telegra
 | User intent | Tool | Example |
 |---|---|---|
 | "Báo khi xong" / "ping me when done" | `send_message` | `send_message(text="✅ Build passed in 3m12s")` |
+| Long task with progress updates | `send_message` once, then `edit_message` | `r = send_message(text="⏳ deploy 0/3")` → `edit_message(message_id=r.message_id, text="⏳ deploy 2/3")` |
 | "Gửi log lỗi" / "send the failing log" | `send_file` | `send_file(path="./logs/test-failures.log", caption="Failing tests")` |
+| "Gửi ảnh chụp" / "send the screenshot" | `send_file` | `send_file(path="./shot.png", caption="New header")` — shows inline |
 | "Gửi video" / "send the demo recording" | `send_video` | `send_video(path="./demo.mp4", caption="Feature demo")` — inline-plays |
 | "Confirm trước khi deploy" / "ask me before X" | `ask` with 2 options | `ask(question="Deploy to prod?", options=["Approve","Cancel"], timeout_s=300)` |
 | "Chọn giúp tôi" / "pick one" | `ask` with options | `ask(question="Which DB to migrate?", options=["staging","prod"])` |
@@ -32,13 +34,43 @@ The user may configure **Telegram**, **ntfy.sh**, **Discord**, or any mix. Each 
 | Tool | Telegram | ntfy.sh | Discord |
 |---|---|---|---|
 | `send_message`, `send_file`, `send_video` | ✅ | ✅ | ✅ |
+| `edit_message` | ✅ | ❌ `transport_unsupported` | ✅ |
 | `set_reminder`, `cancel_reminder`, `list_reminders` | ✅ | ✅ | ✅ |
-| `ask` | ✅ (polling session only) | ❌ `transport_unsupported` | ❌ `transport_unsupported` |
+| `ask` | ✅ (polling session; other sessions only with the broker on) | ❌ `transport_unsupported` | ❌ `transport_unsupported` |
 
 If `ask` returns `error: "transport_unsupported"`, **do not retry**. Tell the user:
 "This channel is one-way (ntfy.sh / Discord) and doesn't support 2-way input. I'll send a notification instead and proceed with a safe default — or switch to a telegram channel if you want me to wait for your reply."
 
 Each tool response includes a `transport` field (`"telegram"`, `"ntfy"`, or `"discord"`) so you know what got used.
+
+### Progress on one message (`edit_message`)
+
+For a long task, send one message and keep updating it instead of sending many pings:
+
+```python
+r = send_message(text="⏳ migrating: 0/4 tables")       # keep r["message_id"]
+edit_message(message_id=r["message_id"], text="⏳ migrating: 3/4 tables")
+send_message(text="✅ migration done in 4m")            # finish with a NEW message so it notifies
+```
+
+- Pass the same `channel` (and `thread_id` on Discord) you sent with.
+- Edits are silent — they never notify or @ping. Send a new message for the final result.
+- Telegram and Discord only. On ntfy `edit_message` returns `transport_unsupported` — send a new message instead; don't retry.
+- Same text caps as `send_message`, but an edit over the cap is rejected (`text_too_long`), never turned into a file.
+- A Telegram file, photo or video message (including a `send_message` result with `delivered_as: "file"`) has a caption instead of text: the edit replaces the caption, max 1024 characters (`caption_too_long` past that). On Discord the attachment stays and the message text changes.
+
+### ntfy options: `priority`, `title`, `tags`
+
+On ntfy channels `send_message` / `send_file` / `send_video` accept `priority` (1 min … 3 default … 5 urgent; overrides `silent`), `title`, and `tags` (list of strings, emoji shortcodes like `"warning"`, `"rotating_light"`, `"white_check_mark"` show as emoji). Use `priority=5` only for things the user must see now (prod down, approval blocking). On Telegram/Discord they are ignored and the response carries a `note`. A priority outside 1–5 returns `invalid_priority`.
+
+```python
+send_message(text="prod API 5xx > 20%", channel="alerts", priority=5, title="Pager", tags=["rotating_light"])
+```
+
+### Long text and images
+
+- Text over the cap is **not** rejected: `send_message` sends the full text as `message.txt` with the beginning as caption (`delivered_as: "file"`). Prefer a short summary message plus a log file when you can.
+- Images (png/jpg/jpeg/webp/gif) sent with `send_file` show inline. The response's `sent_as` says how (`photo`, `animation`, `document`). Pass `as_document=True` when the user wants the original file (Telegram compresses photos).
 
 ### Discord specifics
 
@@ -58,7 +90,7 @@ send_file(path="./out.log", channel="eve", caption="build log")
 Write like a chat message, not a report:
 
 - **Short, simple, direct.** One main point per message. Prefer 1–3 lines.
-- **Hard limit 2000 characters** (not words) — over the cap returns `text_too_long`; split into multiple messages or attach a file.
+- **Limit 2000 characters** (not words) — longer text arrives as a `message.txt` attachment, which is harder to read in chat. Keep it short.
 - Skip heavy markdown, long preambles, and narration. Lead with the outcome ("✅ deploy done", "❌ 3 tests failing").
 
 #### Mentions (@ping)
@@ -76,16 +108,20 @@ send_file(path="./out.log", channel="eve", caption="build log", mention=["alice"
 - **Don't hand-write `<@id>` in `text`.** Only registered users passed via `mention` actually ping; `@everyone`/`@here`/role mentions are always suppressed for safety.
 - `mention` on a Telegram/ntfy channel is ignored (response carries a `note`).
 
-## `ask` needs the polling session
+## `ask` and multiple sessions
 
-Telegram allows one poller per bot token, so when the user has several Claude Code sessions open, only one of them receives replies. Every session can still send.
+Telegram allows one poller per bot token, so when the user has several Claude Code sessions open, only one of them receives replies. Every session can still send. If the user enabled the broker (`broker.enabled: true`), `ask` also works in the other sessions — the polling session relays the question and the answer (the result then carries `via: "broker"`).
 
-If `ask` returns `error: "polling_not_owned"`, **do not retry** — it will keep failing in this session. The response carries `poll_owner_pid`, the session that *can* ask. Tell the user:
+If `ask` returns `error: "polling_not_owned"`, **do not retry** — it will keep failing in this session: either the broker is off, or no live polling session is there to serve it (the `broker` field then says why). The response carries `poll_owner_pid`, the session that *can* ask. Tell the user:
 "Another Claude Code session owns the Telegram connection (pid N), so I can't wait for a reply here. I can notify you with `send_message` and proceed with a safe default, or you can ask me from that session."
 
 Two related errors mean something different — both are config, not contention, so retrying elsewhere won't help either:
 - `polling_disabled` → `bot.disable_polling: true` on this machine.
 - `telegram_not_configured` → no `bot:` section at all (ntfy-only setup).
+
+With the broker on, two more:
+- `broker_unavailable` → the question could not be handed over (spool not writable). Nothing was posted. Don't retry in this session.
+- `ask_requires_operator_chat` → a brokered `ask` can only go to the operator chat. Use `send_message` for that channel.
 
 ## Channels (routing to different chats/groups)
 
@@ -124,10 +160,10 @@ mcgram discord mention list                                  # list registered m
 
 - `ask` timeout default 120s, max 600s. **`ask` BLOCKS the Claude Code session** until reply or timeout — keep timeouts short.
 - `send_file` size cap **50 MB** for Telegram. ntfy.sh public free tier ~15 MB; self-hosted may be higher; Discord **25 MB**. If a large file fails, suggest the user split it or self-host.
-- `send_message` text cap: **4096 chars** on Telegram/ntfy, **2000 chars** on Discord. Over the cap returns `text_too_long` with the transport's `max` — split or send as a file.
+- `send_message` text cap: **4096 chars** on Telegram/ntfy, **2000 chars** on Discord. Over the cap the text is sent as a `message.txt` attachment; only text over the file size cap returns `text_too_long`.
 - Caption max 1024 chars (Telegram limit) — auto-truncated with ellipsis.
-- Max **10 pending reminders**. Max delay **24h**. Reminders **lost on Claude Code shutdown** — don't promise long-term reminders.
-- Max **6 buttons** per `ask`. Use freetext (no `options`) for open-ended answers.
+- Max **10 pending reminders**. Max delay **24h**. Reminders are saved to disk and **survive a restart**: one that came due while mcgram was down fires on the next start, marked late (dropped if more than 24h overdue). Rarely a crash can deliver one twice.
+- Max **6 buttons** per `ask`. Use freetext (no `options`) for open-ended answers. `columns` (1–4) puts several buttons on a row; `multi_select=true` lets the user tick several options and press Done.
 - Rate limit: 20 calls per minute per tool.
 
 ## Error recovery
@@ -140,7 +176,11 @@ mcgram discord mention list                                  # list registered m
 - `path_outside_cwd` → only files inside CWD are sendable. Ask the user to enable `allow_outside_cwd`, or move the file.
 - `file_too_large` → file exceeds the size cap. Compress, split, or summarize.
 - `ask` returning `source: "timeout"` → user didn't reply. Decide: retry, default, or abort.
-- `text_too_long` → text exceeds the transport cap (`max` in the response: 4096 Telegram/ntfy, 2000 Discord); split or send as a file.
+- `text_too_long` → from `send_message`: the text is bigger than the transport's file cap (`max_bytes`) — summarize or split. From `edit_message`: over the message cap (`max`) — shorten the edit.
+- `caption_too_long` (from `edit_message`) → the target is a Telegram file/photo/video whose caption is capped at `max` (1024) — shorten the edit, or send a new message.
+- `transport_unsupported` from `edit_message` → ntfy can't edit; send a new message.
+- `invalid_message_id` → pass the `message_id` exactly as a send returned it.
+- `invalid_priority` / `invalid_title` / `invalid_tags` → fix the ntfy option (priority 1–5, tags a list of strings without commas).
 - `unknown_mention` (from `mention=[...]` on Discord) → a name isn't registered. Read the `known` list; ask the user to `mcgram discord mention add` it, or use a known name. Do **NOT** retry the same name.
 - `reminder_max_pending` → too many pending reminders. Cancel some via `cancel_reminder`.
 - `telegram_api` / `ntfy_api` / `discord_api` → the service answered and refused. Read the `reason` field for details (Discord maps common causes: bad webhook, wrong `thread_id`, rate limit). Don't blind-retry — the same call usually fails the same way.
@@ -148,10 +188,12 @@ mcgram discord mention list                                  # list registered m
 
 ## How `ask` resolves (Telegram only)
 
-User replies by **tapping a button** (when `options` provided) or by **typing a free-text reply**. First reply wins. Timeout → `{source: "timeout", value: ""}`.
+User replies by **tapping a button** (when `options` provided) or by **typing a free-text reply**. First reply wins. Timeout → `{source: "timeout", value: ""}`, and the question is marked `⏱ timed out` in the chat.
+
+With `multi_select=true`, `value` is always a **list**: the ticked labels in option order after Done, `[text]` for a typed reply, `[]` on timeout. Use it for "which of these apply?" questions, e.g. `ask(question="Which envs to deploy?", options=["dev","staging","prod"], multi_select=True, columns=3)`.
 
 Source field tells you HOW they replied:
-- `button` — tapped one of the provided options (value = button label)
+- `button` — tapped one of the provided options (value = button label, or the list of ticked labels)
 - `freetext` — typed a custom reply (value = their text)
 - `timeout` — no reply within the deadline
 
@@ -163,8 +205,8 @@ Every tool call is logged to `~/.mcgram/audit.jsonl` with the `transport` field.
 
 - Don't send raw secrets, passwords, or production credentials.
 - For **ntfy.sh public topics**: assume **anyone with the topic URL can read your messages**. Don't send personally identifiable info or secrets unless the user is on a self-hosted ntfy with auth.
-- Don't schedule reminders longer than 24h — they're in-memory and lost on restart.
-- Don't promise reminders will survive Claude Code shutdown.
+- Don't schedule reminders longer than 24h — the cap rejects them.
+- Don't promise a reminder fires on time if the machine may be off: it is delivered late on the next start, or dropped after 24h.
 - Don't retry `ask` on a ntfy channel after `transport_unsupported`.
 - Don't use very long `ask` timeouts (>5 min) — they freeze the Claude Code session.
 - Don't spam — respect the 20/min rate limit. Batch updates.

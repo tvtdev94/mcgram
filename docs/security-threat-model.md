@@ -11,8 +11,12 @@ mcgram is a **personal** tool: one user, one bot, one chat, running on a develop
                                     │              ├── [ ntfy.sh API ]
                                     │              └── [ Discord Webhooks ]
                                     │
-                                    └── ~/.mcgram/{config.yaml, .env, audit.jsonl, .lock}
+                                    └── ~/.mcgram/{config.yaml, .env, audit.jsonl, .lock, spool/}
 ```
+
+`spool/` is the one artifact where **write** access is a decision-making
+capability: with the broker on, a file in `spool/asks/` can stand in for the
+operator's answer. See [Broker spool](#broker-spool).
 
 - **In trust boundary:** the mcgram process, its config dir (`~/.mcgram/`), the local Claude Code session.
 - **Outside:** Telegram's servers, Discord's servers, ntfy.sh, the public internet, anyone who could intercept TLS or compromise credentials.
@@ -27,7 +31,7 @@ mcgram is a **personal** tool: one user, one bot, one chat, running on a develop
 | Random Telegram user DMs the bot to fake an "operator reply" | `update_dispatcher.from_operator` rejects any update whose `chat.id != operator_chat_id`. Rejected updates audited as `{tool:"_polling", status:"rejected", reason:"non_operator"}`. |
 | Prompt injection in Claude's context tells it to send credentials | Cannot defend in the bridge — Claude's prompt-handling owns this. Audit log + `redact_text` option let the user notice after the fact. |
 | Second `mcgram` process picks up the same bot token (would steal updates) | `SingleInstanceLock` (PID file) elects a single poller per machine; losers run send-only and never call `getUpdates`. Also: Telegram returns HTTP 409 if two clients poll the same bot — `tg_client` surfaces it as `TelegramError`, and the loop backs off 10s. |
-| Degraded instance answers an `ask` it can't actually receive (operator's reply is delivered elsewhere) | `ask` requires poll ownership and returns `polling_not_owned` immediately. The `AskRegistry` exists only in the polling process, so no non-owner can hold a pending question. |
+| Degraded instance answers an `ask` it can't actually receive (operator's reply is delivered elsewhere) | **Broker off (default):** a non-owner returns `polling_not_owned` immediately, and only the polling process holds pending questions. **Broker on:** a non-owner may wait for an answer that the polling process relays through the spool. That gives up the "only the poller can answer" property. What replaces it is a heartbeat check before anything is written and provenance binding on the answer — see [Broker spool](#broker-spool). |
 
 ### T — Tampering
 
@@ -62,7 +66,7 @@ mcgram is a **personal** tool: one user, one bot, one chat, running on a develop
 | Threat | Mitigation |
 |---|---|
 | Prompt injection spams `send_message` 1000×/sec | Per-tool token bucket (default 20/min). 21st call rejected with `RateLimitError`. |
-| Prompt injection schedules 1000 reminders for 24h later (memory exhaustion) | `reminder_max_pending` (default 10) + `reminder_max_delay_s` (24h) + `reminder_text_max_chars` (1000). |
+| Prompt injection schedules 1000 reminders for 24h later (memory exhaustion) | `reminder_max_pending` (default 10; a process holds at most twice that, own plus adopted) + `reminder_max_delay_s` (24h) + `reminder_text_max_chars` (1000). |
 | Prompt injection uses `ask(timeout_s=86400)` to freeze Claude forever | `limits.ask_timeout_max_s` (default 600s) hard-caps the wait. |
 | Prompt injection uploads a 10 GB file | `limits.file_max_bytes` (default 50 MB — Telegram's hard limit anyway). |
 | Telegram API returns persistent 5xx | Polling backs off exponentially (1s → 30s). Send tools fail-fast with `telegram_api` error and audit. |
@@ -85,6 +89,28 @@ mcgram is a **personal** tool: one user, one bot, one chat, running on a develop
 - Compromised Discord server (webhook URL theft lets someone POST to your channel)
 - Sophisticated traffic analysis of the user's home IP ↔ Telegram / Discord / ntfy servers
 - Anyone with `~/.mcgram/` read access — they have your bot token + all Discord webhook URLs
+- With the broker on, anyone who can **write** `~/.mcgram/spool/` as your user can forge an `ask` answer. Write access is not the same as having the token: the token lets you *send* as the bot, not fabricate an operator reply. Provenance binding raises the bar but does not stop a same-uid attacker.
+
+## Broker spool
+
+`~/.mcgram/spool/<config-id>/` holds two namespaces, where `<config-id>` is the first 16 hex of the SHA-256 of the resolved config file path. Records name a channel, not a config, so each config gets its own directory; otherwise a session on one config would adopt another config's reminders and trust its broker heartbeat:
+
+- `reminders/` is always on. It holds pending reminders so they survive a restart.
+- `asks/` exists only with `broker.enabled: true`, which is off by default.
+
+Dirs are 0700 and files 0600 on POSIX. At boot, `spool_safety.probe_dir` refuses any directory from `~/.mcgram/spool` down to the namespace dir that is a symlink, owned by another uid, or wider than 0700 (on Windows the user-profile ACLs carry this instead). Keys are validated against `[a-z]_[0-9a-f]{8,32}`, so ids like `../x`, `a/b` or `C:evil` never reach the filesystem. Every record has an `expires_at` and is swept, including orphans left by killed processes.
+
+| STRIDE | Threat | Mitigation |
+|---|---|---|
+| **S** | Prompt injection with shell access writes `asks/q_x.answer.json = {"value":"Approve"}` and approves its own dangerous action | **Broker off by default.** When on, the requester accepts an answer only if `answered_by_pid` is a pid it saw holding the poll lock while it waited (an owner that shuts down answers `cancelled` and then releases the lock), and logs a warning otherwise. Both sides audit `via: broker` + `answered_by_pid`. This turns forgery from "write one file" into "hold the poll lock", but it does **not** stop a determined same-uid attacker, who can read the lock file too. Don't enable the broker where `ask` gates truly dangerous actions and untrusted code runs as your user. |
+| **T** | Edit a pending `request.json` so the operator sees a different question, or write one aimed at another chat or past the limits | Files are 0600 in a 0700 dir with short TTLs. A same-uid process can still edit the question — same caveat as above. The owner holds every request to its **own** config: `chat_id` must be its `operator_chat_id`, options at most `ask_options_max`, question and labels at most 4096 characters, `timeout_s` at most `ask_timeout_max_s`. Otherwise it posts nothing and answers `invalid_request`, which the requester reports at once. |
+| **T** | Plant a `reminders/r_x.rec.json` so mcgram sends attacker text to your chat | Same-uid only, given the probe. Records are validated (types, key match, text/delay caps) before adoption. The bot can only reach your own configured channels. |
+| **I** | Question text and options are **on disk** while an ask is open; reminder text is on disk until it fires | It has to be: the owner reads the question to post it, and the requester reads `value` to return it. **`audit.redact_text` does not apply to the spool** — redacting there would break the feature. Mitigated by 0600, short TTLs, and sweeping. |
+| **D** | Flood the spool with requests or orphan reminders | Owner-side rate limit (the bot token's budget) for brokered asks. Adoption stops at `reminder_max_pending` per process. Expired records are swept. |
+| **D** | Owner in 409/backoff, dead, or on an older protocol leaves requesters blocking | Requesters check the heartbeat (fresh, same protocol, live pid) before writing anything and fail fast with `polling_not_owned`. A demoted owner withdraws its heartbeat at once. |
+| **E** | Two pollers (`MCGRAM_SKIP_LOCK=1`) serve one request twice, or two instances fire one reminder twice | Requests are claimed with `taken` via `O_EXCL`. Orphan reminders are claimed per owner generation via `O_EXCL`, and a fired or cancelled reminder gets an `O_EXCL` tombstone before its record is removed, so a failed delete cannot make it fire again. Owners prove liveness with a heartbeat, not the pid alone, so a reused pid cannot strand or double-claim a reminder. A reminder can still fire twice if a process dies between sending and writing the tombstone. |
+
+`broker.spool_dir` can move the spool; the probe still applies. NFS/SMB shares are unsupported (`os.replace` and `O_EXCL` are not reliably atomic there).
 
 ## Reporting issues
 

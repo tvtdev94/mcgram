@@ -1,4 +1,4 @@
-"""Tool: send_message — post text to the operator chat (telegram or ntfy)."""
+"""Tool: send_message — post text to a configured channel."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import time
 from typing import Any
 
 from ..discord_client import format_mention_prefix, webhook_id_from_url
-from ..dispatch import send_text
+from ..dispatch import send_document, send_text
 from ..errors import (
     ConfigError,
     DiscordError,
@@ -16,7 +16,10 @@ from ..errors import (
     TransportError,
 )
 from ..runtime import AppState
+from . import _ntfy_options
+from ._long_text import text_attachment, truncate_caption
 from ._mentions import resolve_for_dest
+from .send_file import file_cap
 
 TOOL_NAME = "send_message"
 # Text hard caps differ per transport; resolved after we know the destination.
@@ -34,6 +37,9 @@ def schema() -> dict[str, Any]:
         "description": (
             "Send a text message to a configured channel (Telegram, ntfy.sh, or "
             "Discord). Use for progress updates, completion pings, error reports. "
+            "Text over the channel's message cap (4096 Telegram/ntfy, 2000 Discord) "
+            "is delivered as a message.txt attachment captioned with its beginning "
+            "(result has delivered_as: 'file'). Returns message_id for edit_message. "
             "Discord channels have no default — name the channel explicitly."
         ),
         "inputSchema": {
@@ -71,6 +77,7 @@ def schema() -> dict[str, Any]:
                         "Ignored on Telegram/ntfy."
                     ),
                 },
+                **_ntfy_options.SCHEMA_PROPERTIES,
             },
             "required": ["text"],
         },
@@ -81,7 +88,10 @@ async def handle(state: AppState, *, text: str, channel: str | None = None,
                  silent: bool = False,
                  parse_mode: str | None = None,
                  thread_id: str | None = None,
-                 mention: list[str] | None = None) -> dict[str, Any]:
+                 mention: list[str] | None = None,
+                 priority: int | None = None,
+                 title: str | None = None,
+                 tags: list[str] | None = None) -> dict[str, Any]:
     if not text or not isinstance(text, str):
         return {"error": "invalid_input", "reason": "text_required"}
     # Resolve first — the text length cap depends on the destination transport.
@@ -97,12 +107,28 @@ async def handle(state: AppState, *, text: str, channel: str | None = None,
                            "reason": "unknown_mention", "channel": dest.name,
                            "unknown": mention_err["unknown"]})
         return mention_err
+    ntfy_kwargs, ntfy_note, ntfy_err = _ntfy_options.resolve_ntfy_options(
+        dest, priority=priority, title=title, tags=tags,
+    )
+    if ntfy_err is not None:
+        state.audit.write({"tool": TOOL_NAME, "status": "rejected",
+                           "reason": ntfy_err["reason"], "channel": dest.name})
+        return ntfy_err
     # Prepend the @mention run so the cap check counts it (Discord rejects >2000).
     content = format_mention_prefix(mention_ids) + text if mention_ids else text
     max_text = _MAX_TEXT_BY_TRANSPORT.get(dest.transport, _DEFAULT_MAX_TEXT)
-    if len(content) > max_text:
+    # Over the message cap: deliver the full text as a .txt attachment instead,
+    # still bounded by the transport's file cap.
+    as_file = len(content) > max_text
+    text_bytes = len(text.encode("utf-8"))
+    max_bytes = file_cap(state.settings.limits, dest.transport)
+    if as_file and text_bytes > max_bytes:
+        state.audit.write({"tool": TOOL_NAME, "status": "rejected",
+                           "reason": "text_too_long", "channel": dest.name,
+                           "bytes": text_bytes})
         return {"error": "invalid_input", "reason": "text_too_long",
-                "max": max_text, "transport": dest.transport}
+                "max": max_text, "bytes": text_bytes, "max_bytes": max_bytes,
+                "transport": dest.transport}
     if not state.rate.try_acquire(TOOL_NAME):
         state.audit.write({"tool": TOOL_NAME, "status": "rejected", "reason": "rate_limit"})
         raise RateLimitError(TOOL_NAME)
@@ -111,13 +137,22 @@ async def handle(state: AppState, *, text: str, channel: str | None = None,
     api_parse_mode = "MarkdownV2" if mode == "markdown_v2" else None
     t0 = time.monotonic()
     try:
-        sent = await send_text(
-            state, dest, content,
-            silent=silent,
-            parse_mode=api_parse_mode if dest.transport == "telegram" else None,
-            thread_id=thread_id,
-            mention_user_ids=mention_ids or None,
-        )
+        if as_file:
+            with text_attachment(text) as path:
+                sent = await send_document(
+                    state, dest, path,
+                    caption=truncate_caption(content, state.settings.limits.caption_max_chars),
+                    silent=silent, thread_id=thread_id,
+                    mention_user_ids=mention_ids or None, **ntfy_kwargs,
+                )
+        else:
+            sent = await send_text(
+                state, dest, content,
+                silent=silent,
+                parse_mode=api_parse_mode if dest.transport == "telegram" else None,
+                thread_id=thread_id,
+                mention_user_ids=mention_ids or None, **ntfy_kwargs,
+            )
     except TransportError as e:
         state.audit.write({
             "tool": TOOL_NAME, "status": "error",
@@ -148,6 +183,8 @@ async def handle(state: AppState, *, text: str, channel: str | None = None,
         "text": content, "text_len": len(content), "ms": ms,
         "message_id": sent["message_id"],
     }
+    if as_file:
+        record.update(delivered_as="file", bytes=text_bytes)
     if dest.transport == "discord":
         # Audit the webhook ID only — never the full URL (it carries the token).
         record["discord_webhook_id"] = webhook_id_from_url(dest.discord_webhook_url or "")
@@ -157,7 +194,9 @@ async def handle(state: AppState, *, text: str, channel: str | None = None,
     state.audit.write(record)
     result: dict[str, Any] = {"ok": True, "message_id": sent["message_id"],
                               "channel": dest.name, "transport": dest.transport}
-    notes = [n for n in (mention_note,) if n]
+    if as_file:
+        result.update(delivered_as="file", bytes=text_bytes)
+    notes = [n for n in (mention_note, ntfy_note) if n]
     if thread_id is not None and dest.transport != "discord":
         notes.append(f"thread_id ignored for {dest.transport}")
     if notes:

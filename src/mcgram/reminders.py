@@ -1,4 +1,4 @@
-"""In-process reminder scheduler — fires `send_message(⏰ text)` after delay_s."""
+"""Reminder scheduler — fires `send_message(⏰ text)` after delay_s."""
 
 from __future__ import annotations
 
@@ -10,10 +10,12 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from .dispatch import require_client, send_text
-from .errors import LimitError
+from .errors import ConfigError, LimitError
+from .reminder_spool import ADOPT_INTERVAL_S
 
 if TYPE_CHECKING:
     from .config import Destination
+    from .reminder_spool import ReminderSpool
     from .runtime import AppState
 
 log = logging.getLogger("mcgram.reminders")
@@ -24,19 +26,29 @@ def _iso(epoch: float) -> str:
 
 
 class ReminderScheduler:
-    """Stores pending reminders as asyncio.Tasks. State lost on process exit.
+    """Pending reminders as asyncio.Tasks, mirrored to disk when `store` is set.
 
-    Delivery goes through `dispatch.send_text`, so a reminder reaches whichever
-    transport its channel resolves to — telegram, ntfy, or discord — instead of
-    the scheduler carrying its own per-transport client wiring.
+    Delivery goes through `dispatch.send_text` (telegram, ntfy, or discord).
+    `reminder_max_pending` counts the reminders this process created only: a
+    cross-session cap would refuse a reminder here because some other session
+    is busy, and so would counting the ones adopted from a session that exited.
+    Adoption has its own bound of `reminder_max_pending`, so a process holds at
+    most twice that many.
     """
 
-    def __init__(self, state: AppState) -> None:
+    def __init__(self, state: AppState, store: ReminderSpool | None = None) -> None:
         self._state = state
         self._settings = state.settings
         self._audit = state.audit
         self._tasks: dict[str, asyncio.Task] = {}
         self._meta: dict[str, dict[str, Any]] = {}
+        # Pending reminders taken over from another session (subset of _tasks).
+        self._adopted: set[str] = set()
+        self.store = store
+        self._watch_task: asyncio.Task | None = None
+        # Finished reminders whose record could not be deleted yet; retried
+        # every watcher tick (their tombstone already stops a second fire).
+        self._unremoved: set[str] = set()
 
     def create(self, text: str, delay_s: int, channel: str | None = None) -> dict[str, Any]:
         limits = self._settings.limits
@@ -48,34 +60,53 @@ class ReminderScheduler:
             raise LimitError("reminder_delay_must_be_positive")
         if delay_s > limits.reminder_max_delay_s:
             raise LimitError("reminder_max_delay_s")
-        if len(self._tasks) >= limits.reminder_max_pending:
+        if len(self._tasks) - len(self._adopted) >= limits.reminder_max_pending:
             raise LimitError("reminder_max_pending")
         # Validate channel up-front so the error surfaces synchronously.
         dest = self._settings.resolve_destination(channel)
         require_client(self._state, dest)
         rid = "r_" + secrets.token_hex(4)
         fires_at = time.time() + delay_s
-        self._meta[rid] = {
-            "text": text, "fires_at": fires_at,
-            "channel": dest.name, "transport": dest.transport,
-        }
-        self._tasks[rid] = asyncio.create_task(
-            self._fire(rid, delay_s, text, dest),
-            name=f"mcgram-reminder-{rid}",
-        )
+        self._schedule(rid, text, fires_at, dest)
+        if self.store is not None and not self.store.publish(
+            rid, text=text, fires_at=fires_at, channel=dest.name, transport=dest.transport
+        ):
+            log.warning("reminder %s could not be saved; it will not survive a restart", rid)
         return {"reminder_id": rid, "fires_at": _iso(fires_at),
                 "channel": dest.name, "transport": dest.transport}
 
-    async def _fire(
-        self, rid: str, delay_s: float, text: str, dest: Destination,
+    def _schedule(
+        self, rid: str, text: str, fires_at: float, dest: Destination, *,
+        late: bool = False, adopted: bool = False,
     ) -> None:
         body = f"⏰ {text}"
+        if late:
+            body += (f"\n\n(late: was due {_iso(fires_at)}; the mcgram session that "
+                     "scheduled it stopped before it fired)")
+        self._meta[rid] = {"text": text, "fires_at": fires_at,
+                           "channel": dest.name, "transport": dest.transport}
+        if adopted:
+            self._adopted.add(rid)
+        self._tasks[rid] = asyncio.create_task(
+            self._fire(rid, fires_at, body, dest),
+            name=f"mcgram-reminder-{rid}",
+        )
+
+    async def _fire(self, rid: str, fires_at: float, body: str, dest: Destination) -> None:
         try:
-            await asyncio.sleep(delay_s)
+            await asyncio.sleep(max(0.0, fires_at - time.time()))
+            if self.store is not None and not self.store.still_mine(rid):
+                # Cancelled from another session since the last watcher tick,
+                # or adopted away while this process looked dead.
+                self._audit.write({"tool": "_reminder_fire", "status": "skipped",
+                                   "rid": rid, "reason": "cancelled_or_adopted"})
+                return
             await send_text(self._state, dest, body)
             self._audit.write({"tool": "_reminder_fire", "status": "ok",
                                "rid": rid, "transport": dest.transport})
         except asyncio.CancelledError:
+            # Cancelled by `cancel()` (which retracts) or by shutdown — whose
+            # whole point is to leave the record for the next process.
             self._audit.write({"tool": "_reminder_fire", "status": "cancelled", "rid": rid})
             raise
         except Exception as e:
@@ -85,16 +116,27 @@ class ReminderScheduler:
                 "rid": rid, "transport": dest.transport, "error": str(e),
             })
         finally:
-            self._tasks.pop(rid, None)
-            self._meta.pop(rid, None)
+            self._forget(rid)
+        self._finish(rid, fires_at)
 
     def cancel(self, rid: str) -> bool:
-        task = self._tasks.pop(rid, None)
+        task = self._tasks.get(rid)
         if task is None:
             return False
         task.cancel()
-        self._meta.pop(rid, None)
+        meta = self._forget(rid)
+        self._finish(rid, meta["fires_at"] if meta else time.time())
         return True
+
+    def _forget(self, rid: str) -> dict[str, Any] | None:
+        """Drop a reminder from memory; returns its metadata."""
+        self._tasks.pop(rid, None)
+        self._adopted.discard(rid)
+        return self._meta.pop(rid, None)
+
+    def _finish(self, rid: str, fires_at: float) -> None:
+        if self.store is not None and not self.store.finish(rid, fires_at):
+            self._unremoved.add(rid)
 
     def list(self) -> list[dict[str, Any]]:
         return [
@@ -106,9 +148,85 @@ class ReminderScheduler:
             for rid, m in self._meta.items()
         ]
 
+    def start(self) -> None:
+        """Start the disk watcher. Needs a running loop, so it is NOT done in
+        `__init__`: the constructor stays sync and loop-free for its callers."""
+        if self.store is not None and self._watch_task is None:
+            self._watch_task = asyncio.create_task(self._watch(), name="mcgram-reminder-watch")
+
     def shutdown(self) -> None:
-        """Cancel all pending reminder tasks. Call before event loop closes."""
+        """Cancel every task. Saved records stay on disk for the next process."""
+        if self._watch_task is not None:
+            self._watch_task.cancel()
+            self._watch_task = None
         for rid, task in list(self._tasks.items()):
             task.cancel()
-            self._tasks.pop(rid, None)
-            self._meta.pop(rid, None)
+            self._forget(rid)
+
+    async def _watch(self) -> None:
+        """Cancels every tick; heartbeat, adoption and sweep on slower cadences.
+
+        Orphans are looked for every `ADOPT_INTERVAL_S`, the first look as soon
+        as `start()` runs, so a restart delivers promptly. The heartbeat is kept
+        only while this process holds records, and a tick never exceeds the
+        beat interval, so a beat is at most one tick late.
+
+        Every step is synchronous, so cancellation can only land on the sleep —
+        never between reading a cancel request and acting on it.
+        """
+        assert self.store is not None
+        cfg = self._settings.broker
+        beat_every = self.store.beat_interval_s
+        tick = min(cfg.poll_interval_s if cfg.enabled else ADOPT_INTERVAL_S, beat_every)
+        next_beat = next_adopt = next_sweep = 0.0
+        while True:
+            try:
+                now = time.monotonic()
+                if (self._tasks or self._unremoved) and now >= next_beat:
+                    next_beat = now + beat_every
+                    self.store.beat()
+                for rid in list(self._unremoved):
+                    if self.store.remove_record(rid):
+                        self._unremoved.discard(rid)
+                for rid in self.store.finished(list(self._tasks)):
+                    if self.cancel(rid):
+                        self._audit.write({"tool": "cancel_reminder", "status": "ok",
+                                           "rid": rid, "via": "spool"})
+                if now >= next_adopt:
+                    next_adopt = now + ADOPT_INTERVAL_S
+                    self._adopt_orphans()
+                if now >= next_sweep:
+                    next_sweep = now + cfg.sweep_interval_s
+                    self.store.sweep()
+            except Exception:
+                log.exception("reminder watch tick failed")
+            await asyncio.sleep(tick)
+
+    def _adopt_orphans(self) -> None:
+        """Take over reminders whose owner is gone; overdue ones fire at once."""
+        assert self.store is not None
+        limits, now = self._settings.limits, time.time()
+        for rec in self.store.orphans():
+            if len(self._adopted) >= limits.reminder_max_pending:
+                return
+            if (rec["rid"] in self._tasks
+                    or len(rec["text"]) > limits.reminder_text_max_chars
+                    or rec["fires_at"] - now > limits.reminder_max_delay_s):
+                continue
+            dest = self._deliverable(rec["channel"])
+            if dest is None or self.store.claim(rec) is None:
+                continue
+            late = rec["fires_at"] <= now
+            self._schedule(rec["rid"], rec["text"], rec["fires_at"], dest,
+                           late=late, adopted=True)
+            self._audit.write({"tool": "_reminder_adopt", "status": "ok", "rid": rec["rid"],
+                               "from_pid": rec["pid"], "late": late})
+
+    def _deliverable(self, channel: str) -> Destination | None:
+        """Destination if THIS instance can deliver; else leave it for one that can."""
+        try:
+            dest = self._settings.resolve_destination(channel)
+            require_client(self._state, dest)
+        except ConfigError:
+            return None
+        return dest
