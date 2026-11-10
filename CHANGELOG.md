@@ -7,6 +7,69 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-11-10
+
+### Added
+- **`edit_message` tool** — replace the text of a message sent earlier, using
+  the `message_id` that `send_message` / `send_file` / `send_video` return.
+  Works on Telegram and Discord, so Claude can keep one live progress message
+  instead of sending many. On a Telegram photo, document or video it edits the
+  caption. ntfy cannot edit and answers `transport_unsupported`.
+- **`ask` from every session (opt-in broker).** With `broker.enabled: true`, a
+  session that does not own Telegram polling hands its question to the one that
+  does through `~/.mcgram/spool/<config-id>/asks/`, and gets the answer back.
+  It still fails fast with `polling_not_owned` when no live polling session
+  exists. **Off by default**: it lets any process running as your user answer
+  a question — read the broker section of `docs/security-threat-model.md` before enabling it.
+- **Reminders survive a restart.** Pending reminders are saved to
+  `~/.mcgram/spool/<config-id>/reminders/` and picked up again on the next
+  start, whether or not the broker is on. A reminder that came due while
+  nothing was running fires right away with a "late" note. When its session has died, exactly one other
+  session takes it over. `list_reminders` and `cancel_reminder` also reach other
+  sessions' reminders, with or without the broker (`cancel_reminder` keeps its
+  `ok` key). Delivery is at most once, except when a process is killed in the
+  instant between sending a reminder and recording it as sent.
+- **Richer `ask`** (Telegram): `multi_select` (toggle buttons plus Done, returns
+  a list), `columns` (1–4 buttons per row), and a question that times out now
+  loses its buttons and is marked `⏱ timed out` in the chat.
+- **ntfy `priority`, `title` and `tags`** on `send_message`, `send_file` and
+  `send_video`. Ignored on Telegram and Discord, with a `note` in the result.
+- **`mcgram test-send <channel>` / `--all`** — send one test message through the
+  normal send path and exit non-zero if any channel fails.
+- `mcgram doctor` checks that the spool directory is usable.
+- The spool is separate per config file: `<config-id>` is the first 16 hex
+  characters of the SHA-256 of the resolved config path, so sessions running
+  different `MCGRAM_CONFIG` files never adopt, list or cancel each other's
+  reminders or share a broker. `broker.spool_dir` replaces only the
+  `~/.mcgram/spool` base.
+
+### Changed
+- **Images are shown inline on Telegram.** `send_file` now sends png/jpg/webp
+  through `sendPhoto` (gif through `sendAnimation`) instead of as a document,
+  and falls back to a document when Telegram rejects it. Telegram recompresses
+  photos; pass `as_document: true` to send the original file as before. The
+  result says how it went out (`sent_as`: `photo`, `animation` or `document`).
+- **Text over the transport limit is delivered as a file** instead of being
+  rejected with `text_too_long`: the full text goes out as `message.txt`, with
+  the start of it as the caption, and the result says `delivered_as: "file"`.
+- **Telegram and Discord retry once on HTTP 429** when the requested wait is 30
+  seconds or less, instead of failing straight away. Calls made from the
+  Telegram poll loop (long-polling, button-tap handling) never wait, so a flood
+  limit cannot stall incoming replies.
+
+### Fixed
+- **The bot token and Discord webhook tokens were written to the server log.**
+  httpx logged every request URL at INFO, and both tokens sit in the URL path,
+  so they ended up in the MCP server's stderr log that Claude Code keeps. httpx
+  now logs warnings only. If you shared those logs, rotate the token.
+- ntfy rejected captions and titles containing line breaks (`Illegal header
+  value`); line breaks in header values are now turned into spaces.
+- A button tap that reached mcgram before Telegram had confirmed posting the
+  question was dropped, and the `ask` hung until its timeout.
+- ntfy titles, tags and file captions with non-ASCII text (Vietnamese, emoji
+  in text) arrived with `?` in place of each such character. They are now sent
+  as RFC 2047 encoded headers, which ntfy decodes.
+
 ## [0.5.2] — 2026-10-30
 
 ### Fixed
