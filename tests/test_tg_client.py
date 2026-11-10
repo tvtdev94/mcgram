@@ -256,8 +256,9 @@ async def test_tap_handling_in_the_poll_loop_never_waits_out_a_flood(
     httpx_mock.add_response(url=f"{base}/answerCallbackQuery", status_code=429,
                             json=_flood(20))
     # Cleanup edits when the open ask is cancelled below; not under test.
-    httpx_mock.add_response(url=f"{base}/editMessageText", json={"ok": True, "result": True},
-                            is_optional=True, is_reusable=True)
+    for method in ("editMessageText", "editMessageReplyMarkup"):
+        httpx_mock.add_response(url=f"{base}/{method}", json={"ok": True, "result": True},
+                                is_optional=True, is_reusable=True)
     async with TelegramClient("T") as c:
         reg = AskRegistry()
         reg.set_answer_hook(c.answer_callback_query)
