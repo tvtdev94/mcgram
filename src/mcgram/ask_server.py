@@ -19,7 +19,7 @@ import time
 from typing import TYPE_CHECKING, Any
 
 from .ask_broker import HEARTBEAT_KEY, HEARTBEAT_KIND, PROTOCOL_VERSION
-from .errors import TelegramError
+from .errors import TelegramError, TransportError
 from .spool import Spool
 
 if TYPE_CHECKING:
@@ -224,6 +224,10 @@ class AskServer:
                     key, "", "cancelled",
                     detail="the polling session stopped before the operator answered")
             raise
+        except TransportError as e:
+            # Same outcome as an `ask` in the polling session: nothing was posted.
+            if not answered:
+                self._write_answer(key, "", "transport_unreachable", detail=e.detail)
         except TelegramError as e:
             if not answered:
                 self._write_answer(key, "", "telegram_error", detail=e.description)
