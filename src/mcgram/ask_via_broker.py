@@ -19,10 +19,10 @@ if TYPE_CHECKING:
 
 TOOL_NAME = "ask"
 
-# The owner picks the request up one poll interval late and runs its own
-# timeout from there, so its "timeout" answer lands slightly after ours would.
-# Waiting a little longer lets the owner's verdict — possibly a last-second tap —
-# be the one reported.
+# The owner times the question out at the same deadline we use (`created_at +
+# timeout_s` in the request) and writes its verdict before touching the chat.
+# This margin only covers that file write and our poll interval, so a
+# last-second tap is the one reported rather than our own timeout.
 ANSWER_GRACE_S = 2.0
 
 _ANSWER_SOURCES = {"button", "freetext", "timeout"}

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 import time
 from typing import TYPE_CHECKING, Any
@@ -151,14 +152,27 @@ class AskServer:
         requester waits out its full timeout and then reports `source:
         "timeout"` — telling Claude the operator ignored the question when in
         fact Telegram errored.
+
+        The question times out at the requester's deadline (`created_at +
+        timeout_s`), not `timeout_s` after posting, and the outcome is written
+        before the chat is edited. Either delay — a flood wait on the post or
+        on the edit — would otherwise let the chat show an answer the requester
+        never received because it had already given up.
         """
+        answered = False
+
+        def record(value: Any, source: str) -> None:
+            nonlocal answered
+            answered = True
+            self._write_answer(key, value, source)
+
         try:
             # The budget belongs to the bot token, not to the calling session,
             # so it is spent here rather than by the requester.
             if not self._rate.try_acquire(TOOL_NAME):
                 self._write_answer(key, "", "rate_limited")
                 return
-            result = await self._registry.open(
+            await self._registry.open(
                 self._client,
                 chat_id=req["chat_id"],
                 question=req["question"],
@@ -166,17 +180,22 @@ class AskServer:
                 timeout_s=req["timeout_s"],
                 multi_select=req.get("multi_select", False),
                 columns=req.get("columns", 1),
+                deadline=req["created_at"] + req["timeout_s"],
+                on_outcome=record,
             )
-            self._write_answer(key, result["value"], result["source"])
         except asyncio.CancelledError:
-            self._write_answer(key, "", "cancelled",
-                               detail="the polling session stopped before the operator answered")
+            if not answered:
+                self._write_answer(
+                    key, "", "cancelled",
+                    detail="the polling session stopped before the operator answered")
             raise
         except TelegramError as e:
-            self._write_answer(key, "", "telegram_error", detail=e.description)
+            if not answered:
+                self._write_answer(key, "", "telegram_error", detail=e.description)
         except Exception:
             log.exception("ask_server: serving %s failed", key)
-            self._write_answer(key, "", "internal_error")
+            if not answered:
+                self._write_answer(key, "", "internal_error")
 
     def _write_answer(
         self, key: str, value: str | list[str], source: str, *, detail: str | None = None
@@ -213,6 +232,10 @@ def _expired(req: dict[str, Any], now: float) -> bool:
     return expires < now
 
 
+def _finite(value: Any) -> bool:
+    return isinstance(value, int | float) and not isinstance(value, bool) and math.isfinite(value)
+
+
 def _well_formed(req: dict[str, Any]) -> bool:
     """Reject anything `AskRegistry.open` would choke on.
 
@@ -221,6 +244,8 @@ def _well_formed(req: dict[str, Any]) -> bool:
     raising inside the serve task.
     """
     if not isinstance(req.get("question"), str) or not req["question"]:
+        return False
+    if not _finite(req.get("created_at")):
         return False
     if not isinstance(req.get("chat_id"), int) or isinstance(req.get("chat_id"), bool):
         return False

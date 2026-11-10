@@ -16,6 +16,7 @@ from typing import Any
 
 import pytest
 
+from mcgram import ask_via_broker
 from mcgram.ask_broker import HEARTBEAT_KEY, HEARTBEAT_KIND, PROTOCOL_VERSION
 from mcgram.ask_registry import AskRegistry
 from mcgram.audit import AuditLog
@@ -145,6 +146,39 @@ async def test_freetext_answer_reaches_the_non_polling_session(pair: Any) -> Non
     out = await ask.handle(requester, question="When?", timeout_s=5)
     await reply
     assert (out["value"], out["source"]) == ("after lunch", "freetext")
+
+
+@pytest.mark.parametrize(
+    ("post_delay_s", "edit_delay_s", "source", "chat_mark"),
+    [
+        (1.3, 0.0, "timeout", "⏱ timed out"),
+        (0.0, 1.5, "button", "✅"),
+    ],
+    ids=["post-outlasts-the-deadline", "chat-edit-outlasts-the-deadline"],
+)
+async def test_requester_and_chat_agree_on_the_outcome(
+    pair: Any, monkeypatch: pytest.MonkeyPatch,
+    post_delay_s: float, edit_delay_s: float, source: str, chat_mark: str,
+) -> None:
+    """The requester gives up at its own deadline; the chat must never say
+    otherwise. Posting or editing can each sleep out a Telegram flood wait,
+    so neither may push the owner's verdict past that deadline."""
+    requester, owner, registry = pair
+    monkeypatch.setattr(ask_via_broker, "ANSWER_GRACE_S", 0.1)
+    owner.client.post_delay_s, owner.client.edit_delay_s = post_delay_s, edit_delay_s
+
+    async def operator_taps_once_posted() -> None:
+        if await _until(lambda: bool(registry._pending)):
+            q_id = next(iter(registry._pending))
+            await registry.handle_update({"callback_query": {"id": "cb", "data": f"{q_id}:0"}})
+
+    tap = asyncio.create_task(operator_taps_once_posted())
+    out = await ask.handle(requester, question="Ship?", options=["Yes"], timeout_s=1)
+    await tap
+    assert await _until(lambda: any(e["kind"] == "text" for e in owner.client.edited), 5)
+    assert out["source"] == source
+    [shown] = [e["text"] for e in owner.client.edited if e["kind"] == "text"]
+    assert chat_mark in shown
 
 
 async def test_owner_side_failure_is_reported_as_an_error_not_a_timeout(

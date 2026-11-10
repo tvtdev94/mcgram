@@ -7,6 +7,7 @@ import contextlib
 import logging
 import secrets
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -80,6 +81,8 @@ class AskRegistry:
         timeout_s: int,
         multi_select: bool = False,
         columns: int = 1,
+        deadline: float | None = None,
+        on_outcome: Callable[[Any, str], None] | None = None,
     ) -> dict[str, Any]:
         """Post, wait, record the outcome in the chat.
 
@@ -87,6 +90,11 @@ class AskRegistry:
         the selected labels in option order, `[text]` for a typed reply, `[]` on
         timeout — so a caller never has to branch on the type. Otherwise it is
         a string, as it always was.
+
+        `deadline` (epoch seconds) replaces "timeout_s after posting" for a
+        caller whose clock started earlier: posting can sleep out a flood wait.
+        `on_outcome(value, source)` runs as soon as the outcome is known, before
+        the chat is edited — those edits can sleep out a flood wait too.
         """
         multi_select = bool(multi_select and options)
         q_id = "q_" + secrets.token_hex(4)
@@ -108,18 +116,23 @@ class AskRegistry:
             columns=columns,
             client=client,
         )
+        wait_s = timeout_s if deadline is None else max(0.0, deadline - time.time())
         try:
-            value, source = await asyncio.wait_for(fut, timeout=timeout_s)
+            value, source = await asyncio.wait_for(fut, timeout=wait_s)
         except TimeoutError:
+            empty: str | list[str] = [] if multi_select else ""
+            if on_outcome is not None:
+                on_outcome(empty, "timeout")
             await _mark_timed_out(client, chat_id, msg["message_id"], question)
-            return {"value": [] if multi_select else "", "source": "timeout",
-                    "question_id": q_id}
+            return {"value": empty, "source": "timeout", "question_id": q_id}
         except asyncio.CancelledError:
             # Shutdown: nobody will read a tap on this question any more.
             await _mark_abandoned(client, chat_id, msg["message_id"], question)
             raise
         finally:
             self._pending.pop(q_id, None)
+        if on_outcome is not None:
+            on_outcome(value, source)
         await _mark_answered(client, chat_id, msg["message_id"], question, value, source)
         return {"value": value, "source": source, "question_id": q_id}
 

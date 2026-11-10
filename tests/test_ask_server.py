@@ -34,8 +34,12 @@ class FakeClient:
         self.edited: list[dict[str, Any]] = []
         self._next_message_id = 1000
         self._fail_send = fail_send
+        # Stand-ins for a Telegram call that sleeps out a flood wait.
+        self.post_delay_s = 0.0
+        self.edit_delay_s = 0.0
 
     async def send_message(self, chat_id: int, text: str, **kwargs: Any) -> dict[str, Any]:
+        await asyncio.sleep(self.post_delay_s)
         if self._fail_send is not None:
             raise self._fail_send
         self._next_message_id += 1
@@ -51,6 +55,7 @@ class FakeClient:
     async def edit_message_text(
         self, chat_id: int, message_id: int, text: str, **kwargs: Any
     ) -> None:
+        await asyncio.sleep(self.edit_delay_s)
         self.edited.append({"kind": "text", "message_id": message_id, "text": text})
 
     async def answer_callback_query(self, callback_query_id: str) -> bool:
