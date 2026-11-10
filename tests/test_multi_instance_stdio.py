@@ -34,6 +34,8 @@ bot:
   operator_chat_id: 12345
 audit:
   path: {(home / 'audit.jsonl').as_posix()}
+broker:
+  spool_dir: {(home / 'spool').as_posix()}
 api_root: {_UNREACHABLE}
 """,
         encoding="utf-8",

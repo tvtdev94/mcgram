@@ -1,4 +1,4 @@
-"""Boot-time wiring for the ask broker: build it, serve it while we own polling.
+"""Boot-time wiring for the spool: the ask broker and the reminder store.
 
 Ownership comes and goes at runtime (`PollOwnership` promotes and demotes), so
 the owner half is not started once and forgotten. A small supervisor watches
@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING
 from .ask_broker import HEARTBEAT_KEY, HEARTBEAT_KIND, AskBroker
 from .ask_server import AskServer
 from .poll_ownership import cancel_task
+from .reminder_spool import ReminderSpool
 from .spool import Spool
 
 if TYPE_CHECKING:
@@ -30,6 +31,7 @@ if TYPE_CHECKING:
 log = logging.getLogger("mcgram.broker")
 
 ASK_NAMESPACE = "asks"
+REMINDER_NAMESPACE = "reminders"
 
 
 def safe_spool(settings: Settings, namespace: str) -> tuple[Spool | None, str]:
@@ -37,6 +39,21 @@ def safe_spool(settings: Settings, namespace: str) -> tuple[Spool | None, str]:
     spool = Spool(settings.spool_root, namespace)
     ok, reason = spool.probe()
     return (spool, "") if ok else (None, reason)
+
+
+def build_reminder_store(settings: Settings) -> ReminderSpool | None:
+    """Disk store for pending reminders — independent of `broker.enabled`.
+
+    Durability is not a cross-session feature: a lone session must keep its
+    reminders across a restart too. Unsafe spool → reminders stay in memory.
+    """
+    spool, reason = safe_spool(settings, REMINDER_NAMESPACE)
+    if spool is None:
+        log.warning("reminder spool at %s is unsafe (%s) — pending reminders will "
+                    "be lost on restart.", settings.spool_root, reason)
+        return None
+    return ReminderSpool(spool, cancel_ttl_s=settings.broker.cancel_ttl_s,
+                         tmp_grace_s=settings.broker.tmp_grace_s)
 
 
 def start_ask_broker(state: AppState) -> asyncio.Task | None:
