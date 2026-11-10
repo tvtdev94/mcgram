@@ -1,4 +1,4 @@
-"""Tool: send_file — upload a local file to the operator chat (telegram or ntfy)."""
+"""Tool: send_file — upload a local file to a configured channel."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from ..config import LimitsConfig
 from ..discord_client import format_mention_prefix, webhook_id_from_url
 from ..dispatch import send_document
 from ..errors import (
@@ -18,6 +19,8 @@ from ..errors import (
     TransportError,
 )
 from ..runtime import AppState
+from . import _ntfy_options
+from ._long_text import truncate_caption
 from ._mentions import resolve_for_dest
 
 TOOL_NAME = "send_file"
@@ -28,8 +31,9 @@ def schema() -> dict[str, Any]:
         "name": TOOL_NAME,
         "description": (
             "Send a local file as an attachment to a configured channel. "
-            "Use for logs, screenshots, generated artifacts. Path must be inside CWD "
-            "unless config sets allow_outside_cwd: true."
+            "Use for logs, screenshots, generated artifacts. Images "
+            "(png/jpg/jpeg/webp/gif) show inline in the chat. Path must be inside "
+            "CWD unless config sets allow_outside_cwd: true."
         ),
         "inputSchema": {
             "type": "object",
@@ -41,6 +45,14 @@ def schema() -> dict[str, Any]:
                 },
                 "caption": {"type": "string", "description": "Optional caption (≤1024 chars)"},
                 "silent": {"type": "boolean", "default": False},
+                "as_document": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "Telegram: send an image as a plain file instead of an "
+                        "inline photo. Discord/ntfy always preview images."
+                    ),
+                },
                 "thread_id": {
                     "type": "string",
                     "description": (
@@ -57,10 +69,20 @@ def schema() -> dict[str, Any]:
                         "caption) that ping those users. Ignored on Telegram/ntfy."
                     ),
                 },
+                **_ntfy_options.SCHEMA_PROPERTIES,
             },
             "required": ["path"],
         },
     }
+
+
+def file_cap(limits: LimitsConfig, transport: str) -> int:
+    """Largest upload in bytes for `transport` (global cap, tightened per transport)."""
+    if transport == "ntfy":
+        return min(limits.file_max_bytes, limits.ntfy_file_max_bytes)
+    if transport == "discord":
+        return min(limits.file_max_bytes, limits.discord_file_max_bytes)
+    return limits.file_max_bytes
 
 
 def _validate_path(
@@ -92,7 +114,11 @@ async def handle(state: AppState, *, path: str, channel: str | None = None,
                  caption: str | None = None,
                  silent: bool = False,
                  thread_id: str | None = None,
-                 mention: list[str] | None = None) -> dict[str, Any]:
+                 mention: list[str] | None = None,
+                 as_document: bool = False,
+                 priority: int | None = None,
+                 title: str | None = None,
+                 tags: list[str] | None = None) -> dict[str, Any]:
     limits = state.settings.limits
     try:
         dest = state.settings.resolve_destination(channel)
@@ -107,16 +133,18 @@ async def handle(state: AppState, *, path: str, channel: str | None = None,
                            "reason": "unknown_mention", "channel": dest.name,
                            "unknown": mention_err["unknown"]})
         return mention_err
+    ntfy_kwargs, ntfy_note, ntfy_err = _ntfy_options.resolve_ntfy_options(
+        dest, priority=priority, title=title, tags=tags,
+    )
+    if ntfy_err is not None:
+        state.audit.write({"tool": TOOL_NAME, "status": "rejected",
+                           "reason": ntfy_err["reason"], "channel": dest.name})
+        return ntfy_err
 
-    max_bytes = limits.file_max_bytes
-    if dest.transport == "ntfy":
-        max_bytes = min(max_bytes, limits.ntfy_file_max_bytes)
-    elif dest.transport == "discord":
-        max_bytes = min(max_bytes, limits.discord_file_max_bytes)
     resolved, err = _validate_path(
         path,
         allow_outside_cwd=state.settings.allow_outside_cwd,
-        max_bytes=max_bytes,
+        max_bytes=file_cap(limits, dest.transport),
     )
     if err is not None:
         state.audit.write({"tool": TOOL_NAME, "status": "rejected", **err})
@@ -127,8 +155,8 @@ async def handle(state: AppState, *, path: str, channel: str | None = None,
     # so the mention run survives the caption cap.
     if mention_ids:
         caption = format_mention_prefix(mention_ids) + (caption or "")
-    if caption and len(caption) > limits.caption_max_chars:
-        caption = caption[: limits.caption_max_chars - 1] + "…"
+    if caption:
+        caption = truncate_caption(caption, limits.caption_max_chars)
 
     if not state.rate.try_acquire(TOOL_NAME):
         state.audit.write({"tool": TOOL_NAME, "status": "rejected", "reason": "rate_limit"})
@@ -139,7 +167,8 @@ async def handle(state: AppState, *, path: str, channel: str | None = None,
     try:
         sent = await send_document(
             state, dest, resolved, caption=caption, silent=silent, thread_id=thread_id,
-            mention_user_ids=mention_ids or None,
+            mention_user_ids=mention_ids or None, inline_image=not as_document,
+            **ntfy_kwargs,
         )
     except TransportError as e:
         state.audit.write({
@@ -170,7 +199,7 @@ async def handle(state: AppState, *, path: str, channel: str | None = None,
         "transport": dest.transport, "channel": dest.name,
         "chat_id": dest.chat_id, "ntfy_topic": dest.ntfy_topic,
         "bytes": size, "path": str(resolved), "ms": ms,
-        "message_id": sent["message_id"],
+        "message_id": sent["message_id"], "sent_as": sent["sent_as"],
     }
     if dest.transport == "discord":
         record["discord_webhook_id"] = webhook_id_from_url(dest.discord_webhook_url or "")
@@ -179,8 +208,9 @@ async def handle(state: AppState, *, path: str, channel: str | None = None,
             record["mentions"] = list(mention or [])
     state.audit.write(record)
     result: dict[str, Any] = {"ok": True, "message_id": sent["message_id"], "bytes": size,
-                              "channel": dest.name, "transport": dest.transport}
-    notes = [n for n in (mention_note,) if n]
+                              "channel": dest.name, "transport": dest.transport,
+                              "sent_as": sent["sent_as"]}
+    notes = [n for n in (mention_note, ntfy_note, sent.get("note")) if n]
     if thread_id is not None and dest.transport != "discord":
         notes.append(f"thread_id ignored for {dest.transport}")
     if notes:

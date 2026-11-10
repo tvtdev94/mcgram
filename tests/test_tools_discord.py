@@ -13,7 +13,7 @@ from mcgram.config import Settings
 from mcgram.discord_client import DiscordClient
 from mcgram.rate_limiter import RateLimiter
 from mcgram.runtime import AppState
-from mcgram.tools import ask, send_file, send_message
+from mcgram.tools import ask, edit_message, send_file, send_message
 from mcgram.update_dispatcher import UpdateDispatcher
 
 # Fake webhook: id 123456789, token tok_secret_abc. The token must NEVER be logged.
@@ -88,12 +88,25 @@ async def test_schema_exposes_thread_id() -> None:
 # --------------------------------------------------------------------------- #
 
 
-async def test_discord_text_over_2000_rejected(discord_state: AppState) -> None:
+def _payload_json(req) -> dict:
+    """The `payload_json` form field of a multipart webhook upload."""
+    body = req.content
+    start = body.index(b'name="payload_json"')
+    start = body.index(b"\r\n\r\n", start) + 4
+    return json.loads(body[start: body.index(b"\r\n--", start)])
+
+
+async def test_discord_text_over_2000_sent_as_file(
+    discord_state: AppState, httpx_mock
+) -> None:
+    httpx_mock.add_response(method="POST", json={"id": "901"})
     out = await send_message.handle(discord_state, text="x" * 2001, channel="eve")
-    assert out["error"] == "invalid_input"
-    assert out["reason"] == "text_too_long"
-    assert out["max"] == 2000
-    assert out["transport"] == "discord"
+    assert out["ok"] is True
+    assert out["delivered_as"] == "file"
+    assert out["message_id"] == "901"
+    req = httpx_mock.get_requests()[0]
+    assert b'name="files[0]"; filename="message.txt"' in req.content
+    assert _payload_json(req)["content"] == "x" * 1023 + "…"
 
 
 async def test_telegram_text_2001_still_allowed(app_state: AppState, httpx_mock) -> None:
@@ -279,15 +292,70 @@ async def test_mention_ignored_note_on_telegram(
 
 
 async def test_mention_prefix_counts_toward_2000_cap(
-    discord_mention_state: AppState
+    discord_mention_state: AppState, httpx_mock
 ) -> None:
-    # 1995 chars + "<@id> " prefix (> 5) exceeds Discord's 2000-char content cap.
+    # 1995 chars + "<@id> " prefix (> 5) exceeds Discord's 2000-char content cap,
+    # so it goes out as a file; the caption still pings alice.
+    httpx_mock.add_response(method="POST", json={"id": "902"})
     out = await send_message.handle(
         discord_mention_state, text="x" * 1995, channel="eve", mention=["alice"]
     )
-    assert out["error"] == "invalid_input"
+    assert out["delivered_as"] == "file"
+    payload = _payload_json(httpx_mock.get_requests()[0])
+    assert payload["content"].startswith(f"<@{ALICE_ID}> xxx")
+    assert len(payload["content"]) == 1024
+    assert payload["allowed_mentions"] == {"parse": [], "users": [ALICE_ID]}
+
+
+# --------------------------------------------------------------------------- #
+# edit_message and inline images on Discord
+# --------------------------------------------------------------------------- #
+
+async def test_edit_message_in_thread(discord_state: AppState, httpx_mock) -> None:
+    httpx_mock.add_response(method="PATCH", json={"id": "555"})
+    out = await edit_message.handle(
+        discord_state, message_id="555", text="80% done", channel="eve", thread_id="42",
+    )
+    assert out == {"ok": True, "message_id": "555", "channel": "eve", "transport": "discord"}
+    req = httpx_mock.get_requests()[0]
+    assert req.url.path.endswith("/123456789/tok_secret_abc/messages/555")
+    assert req.url.params.get("thread_id") == "42"
+    rec = _audit(discord_state.audit.path)[-1]
+    assert rec["discord_webhook_id"] == "123456789"
+    assert "tok_secret_abc" not in json.dumps(rec)
+
+
+async def test_edit_message_unknown_message_explained(
+    discord_state: AppState, httpx_mock
+) -> None:
+    httpx_mock.add_response(
+        method="PATCH", status_code=404, json={"message": "Unknown Message", "code": 10008},
+    )
+    out = await edit_message.handle(discord_state, message_id="1", text="x", channel="eve")
+    assert out["error"] == "discord_api"
+    assert "message not found" in out["reason"]
+
+
+async def test_edit_message_over_2000_rejected(discord_state: AppState, httpx_mock) -> None:
+    out = await edit_message.handle(discord_state, message_id="1", text="x" * 2001,
+                                    channel="eve")
     assert out["reason"] == "text_too_long"
     assert out["max"] == 2000
+    assert httpx_mock.get_requests() == []
+
+
+async def test_png_attachment_reported_as_photo(
+    discord_state: AppState, httpx_mock, tmp_path: Path
+) -> None:
+    discord_state.settings.allow_outside_cwd = True
+    p = tmp_path / "chart.png"
+    p.write_bytes(b"\x89PNG\x00")
+    httpx_mock.add_response(method="POST", json={"id": "903"})
+    out = await send_file.handle(discord_state, path=str(p), channel="eve")
+    assert out["sent_as"] == "photo"
+    # Discord previews an attachment inline from its image content type.
+    body = httpx_mock.get_requests()[0].content
+    assert b'filename="chart.png"\r\nContent-Type: image/png' in body
 
 
 async def test_send_file_mention_prepends_caption(

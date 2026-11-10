@@ -41,10 +41,63 @@ async def test_text_required(app_state: AppState) -> None:
     assert out["reason"] == "text_required"
 
 
-async def test_text_too_long(app_state: AppState) -> None:
+TG_DOC = "https://api.telegram.org/botfake-token/sendDocument"
+
+
+def _multipart_field(body: bytes, name: str) -> bytes:
+    """Value of one multipart form field (enough for these fixed fixtures)."""
+    marker = f'name="{name}"'.encode()
+    start = body.index(marker)
+    value_start = body.index(b"\r\n\r\n", start) + 4
+    return body[value_start: body.index(b"\r\n--", value_start)]
+
+
+async def test_long_text_delivered_as_txt_attachment(
+    app_state: AppState, httpx_mock, tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr("tempfile.tempdir", str(tmp_path / "tmp"))
+    (tmp_path / "tmp").mkdir()
+    text = "Báo cáo\n" + "y" * 5000  # over Telegram's 4096 cap, non-ASCII kept
+    httpx_mock.add_response(url=TG_DOC, json={"ok": True, "result": {"message_id": 77}})
+    out = await send_message.handle(app_state, text=text)
+    assert out["ok"] is True
+    assert out["message_id"] == 77
+    assert out["delivered_as"] == "file"
+    assert out["bytes"] == len(text.encode("utf-8"))
+    body = httpx_mock.get_requests()[0].content
+    assert b'filename="message.txt"' in body
+    assert _multipart_field(body, "document") == text.encode("utf-8")
+    caption = _multipart_field(body, "caption").decode("utf-8")
+    assert len(caption) == 1024
+    assert caption.startswith("Báo cáo\nyyy") and caption.endswith("…")
+    # The temporary copy is gone once the upload finished.
+    assert list((tmp_path / "tmp").iterdir()) == []
+    assert _audit_records(app_state.audit.path)[-1]["delivered_as"] == "file"
+
+
+async def test_text_over_file_cap_rejected_without_network(
+    app_state: AppState, httpx_mock
+) -> None:
+    app_state.settings.limits.file_max_bytes = 4500
     out = await send_message.handle(app_state, text="x" * 5000)
     assert out["error"] == "invalid_input"
     assert out["reason"] == "text_too_long"
+    assert out["max_bytes"] == 4500
+    assert httpx_mock.get_requests() == []
+
+
+async def test_ntfy_options_ignored_on_telegram_with_note(
+    app_state: AppState, httpx_mock
+) -> None:
+    httpx_mock.add_response(
+        url="https://api.telegram.org/botfake-token/sendMessage",
+        json={"ok": True, "result": {"message_id": 1}},
+    )
+    out = await send_message.handle(app_state, text="hi", priority=5, tags=["x"])
+    assert out["ok"] is True
+    assert out["note"] == "priority/title/tags ignored for telegram"
+    body = httpx_mock.get_requests()[0].content.decode()
+    assert "priority" not in body and "tags" not in body
 
 
 async def test_rate_limit(app_state: AppState, httpx_mock) -> None:

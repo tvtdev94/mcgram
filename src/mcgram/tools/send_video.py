@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 import time
-from pathlib import Path
 from typing import Any
 
 from ..discord_client import format_mention_prefix, webhook_id_from_url
@@ -18,8 +17,10 @@ from ..errors import (
     TransportError,
 )
 from ..runtime import AppState
+from . import _ntfy_options
+from ._long_text import truncate_caption
 from ._mentions import resolve_for_dest
-from .send_file import _validate_path
+from .send_file import _validate_path, file_cap
 
 TOOL_NAME = "send_video"
 _VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".webm", ".m4v"}
@@ -64,6 +65,7 @@ def schema() -> dict[str, Any]:
                         "caption) that ping those users. Ignored on Telegram/ntfy."
                     ),
                 },
+                **_ntfy_options.SCHEMA_PROPERTIES,
             },
             "required": ["path"],
         },
@@ -74,7 +76,10 @@ async def handle(state: AppState, *, path: str, channel: str | None = None,
                  caption: str | None = None, silent: bool = False,
                  supports_streaming: bool = True,
                  thread_id: str | None = None,
-                 mention: list[str] | None = None) -> dict[str, Any]:
+                 mention: list[str] | None = None,
+                 priority: int | None = None,
+                 title: str | None = None,
+                 tags: list[str] | None = None) -> dict[str, Any]:
     _ = supports_streaming  # honored implicitly by tg_client.send_video defaults
     limits = state.settings.limits
     try:
@@ -90,16 +95,18 @@ async def handle(state: AppState, *, path: str, channel: str | None = None,
                            "reason": "unknown_mention", "channel": dest.name,
                            "unknown": mention_err["unknown"]})
         return mention_err
+    ntfy_kwargs, ntfy_note, ntfy_err = _ntfy_options.resolve_ntfy_options(
+        dest, priority=priority, title=title, tags=tags,
+    )
+    if ntfy_err is not None:
+        state.audit.write({"tool": TOOL_NAME, "status": "rejected",
+                           "reason": ntfy_err["reason"], "channel": dest.name})
+        return ntfy_err
 
-    max_bytes = limits.file_max_bytes
-    if dest.transport == "ntfy":
-        max_bytes = min(max_bytes, limits.ntfy_file_max_bytes)
-    elif dest.transport == "discord":
-        max_bytes = min(max_bytes, limits.discord_file_max_bytes)
     resolved, err = _validate_path(
         path,
         allow_outside_cwd=state.settings.allow_outside_cwd,
-        max_bytes=max_bytes,
+        max_bytes=file_cap(limits, dest.transport),
     )
     if err is not None:
         state.audit.write({"tool": TOOL_NAME, "status": "rejected", **err})
@@ -114,8 +121,8 @@ async def handle(state: AppState, *, path: str, channel: str | None = None,
 
     if mention_ids:
         caption = format_mention_prefix(mention_ids) + (caption or "")
-    if caption and len(caption) > limits.caption_max_chars:
-        caption = caption[: limits.caption_max_chars - 1] + "…"
+    if caption:
+        caption = truncate_caption(caption, limits.caption_max_chars)
 
     if not state.rate.try_acquire(TOOL_NAME):
         state.audit.write({"tool": TOOL_NAME, "status": "rejected", "reason": "rate_limit"})
@@ -126,7 +133,7 @@ async def handle(state: AppState, *, path: str, channel: str | None = None,
     try:
         sent = await send_video_file(
             state, dest, resolved, caption=caption, silent=silent, thread_id=thread_id,
-            mention_user_ids=mention_ids or None,
+            mention_user_ids=mention_ids or None, **ntfy_kwargs,
         )
     except TransportError as e:
         state.audit.write({
@@ -167,12 +174,10 @@ async def handle(state: AppState, *, path: str, channel: str | None = None,
     state.audit.write(record)
     result: dict[str, Any] = {"ok": True, "message_id": sent["message_id"], "bytes": size,
                               "channel": dest.name, "transport": dest.transport}
-    notes = [n for n in (mention_note,) if n]
+    notes = [n for n in (mention_note, ntfy_note) if n]
     if thread_id is not None and dest.transport != "discord":
         notes.append(f"thread_id ignored for {dest.transport}")
     if notes:
         result["note"] = "; ".join(notes)
     return result
 
-
-_ = Path  # silence unused-import linter
