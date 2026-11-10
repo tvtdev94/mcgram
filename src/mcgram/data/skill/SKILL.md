@@ -57,6 +57,7 @@ send_message(text="✅ migration done in 4m")            # finish with a NEW mes
 - Edits are silent — they never notify or @ping. Send a new message for the final result.
 - Telegram and Discord only. On ntfy `edit_message` returns `transport_unsupported` — send a new message instead; don't retry.
 - Same text caps as `send_message`, but an edit over the cap is rejected (`text_too_long`), never turned into a file.
+- A Telegram file, photo or video message (including a `send_message` result with `delivered_as: "file"`) has a caption instead of text: the edit replaces the caption, max 1024 characters (`caption_too_long` past that). On Discord the attachment stays and the message text changes.
 
 ### ntfy options: `priority`, `title`, `tags`
 
@@ -176,6 +177,7 @@ mcgram discord mention list                                  # list registered m
 - `file_too_large` → file exceeds the size cap. Compress, split, or summarize.
 - `ask` returning `source: "timeout"` → user didn't reply. Decide: retry, default, or abort.
 - `text_too_long` → from `send_message`: the text is bigger than the transport's file cap (`max_bytes`) — summarize or split. From `edit_message`: over the message cap (`max`) — shorten the edit.
+- `caption_too_long` (from `edit_message`) → the target is a Telegram file/photo/video whose caption is capped at `max` (1024) — shorten the edit, or send a new message.
 - `transport_unsupported` from `edit_message` → ntfy can't edit; send a new message.
 - `invalid_message_id` → pass the `message_id` exactly as a send returned it.
 - `invalid_priority` / `invalid_title` / `invalid_tags` → fix the ntfy option (priority 1–5, tags a list of strings without commas).

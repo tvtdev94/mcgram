@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .config import Destination
-from .errors import ConfigError, TelegramError
+from .errors import ConfigError, LimitError, TelegramError
 from .video_meta import probe_video
 
 if TYPE_CHECKING:
@@ -30,6 +30,11 @@ _TG_PHOTO_MAX_BYTES = 10 * 1024 * 1024
 # Telegram answers a photo it cannot take (bad dimensions, size) with 400/413;
 # those fall back to a plain document. Other errors (auth, flood) do not.
 _PHOTO_REJECT_STATUSES = {400, 413}
+# editMessageCaption: "New caption of the message, 0-1024 characters".
+TG_CAPTION_MAX_CHARS = 1024
+# What Telegram answers when editMessageText targets a media message, whose
+# text lives in its caption.
+_NO_TEXT_TO_EDIT = "there is no text in the message to edit"
 
 
 def is_image(path: Path) -> bool:
@@ -123,6 +128,12 @@ async def edit_text(
 
     `message_id` is the value a send returned, as a string; the caller has
     already checked it is numeric.
+
+    On Telegram a photo, video or file (including a long `send_message`
+    delivered as a file) carries a caption instead of text. Telegram says so
+    when asked to edit its text, and the edit is retried as a caption edit,
+    which caps the text at `TG_CAPTION_MAX_CHARS` (LimitError past it).
+    Discord keeps a message's attachments when only its content is edited.
     """
     require_client(state, dest)
     if dest.transport == "ntfy":
@@ -135,9 +146,18 @@ async def edit_text(
         )
         return {"message_id": result.get("id", message_id)}
     assert state.client is not None and dest.chat_id is not None
-    await state.client.edit_message_text(
-        dest.chat_id, int(message_id), text, parse_mode=parse_mode,
-    )
+    try:
+        await state.client.edit_message_text(
+            dest.chat_id, int(message_id), text, parse_mode=parse_mode,
+        )
+    except TelegramError as e:
+        if _NO_TEXT_TO_EDIT not in e.description.lower():
+            raise
+        if len(text) > TG_CAPTION_MAX_CHARS:
+            raise LimitError("caption_too_long") from e
+        await state.client.edit_message_caption(
+            dest.chat_id, int(message_id), text, parse_mode=parse_mode,
+        )
     return {"message_id": int(message_id)}
 
 

@@ -284,3 +284,16 @@ class TelegramClient:
             data["parse_mode"] = parse_mode
         return await self._call("editMessageText", data=data,
                                 retry_flood_wait=retry_flood_wait)
+
+    async def edit_message_caption(
+        self, chat_id: int, message_id: int, caption: str, *, parse_mode: str | None = None
+    ) -> Any:
+        """Replace the caption of a photo, video, animation or document message."""
+        data: dict[str, Any] = {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "caption": caption,
+        }
+        if parse_mode:
+            data["parse_mode"] = parse_mode
+        return await self._call("editMessageCaption", data=data)

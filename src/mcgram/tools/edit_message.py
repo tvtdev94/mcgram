@@ -6,10 +6,11 @@ import time
 from typing import Any
 
 from ..discord_client import webhook_id_from_url
-from ..dispatch import edit_text
+from ..dispatch import TG_CAPTION_MAX_CHARS, edit_text
 from ..errors import (
     ConfigError,
     DiscordError,
+    LimitError,
     NtfyError,
     RateLimitError,
     TelegramError,
@@ -27,8 +28,10 @@ def schema() -> dict[str, Any]:
         "description": (
             "Replace the text of a message sent earlier with send_message, so one "
             "message can show live progress instead of many pings. Telegram and "
-            "Discord only (ntfy → transport_unsupported). Edits never notify or "
-            "ping anyone; @mentions are not supported."
+            "Discord only (ntfy → transport_unsupported). On a Telegram photo, "
+            "video or file (incl. delivered_as: 'file') the caption is edited, "
+            "max 1024 chars. Edits never notify or ping anyone; @mentions are "
+            "not supported."
         ),
         "inputSchema": {
             "type": "object",
@@ -120,6 +123,11 @@ async def handle(state: AppState, *, message_id: Any, text: str,
         reason = getattr(e, "description", str(e))
         state.audit.write({**base, "status": "error", "error": reason})
         return {"error": f"{dest.transport}_api", "reason": reason}
+    except LimitError as e:
+        # A media message: its text is a caption, capped lower than a message.
+        state.audit.write({**base, "status": "rejected", "reason": e.kind})
+        return {"error": "invalid_input", "reason": e.kind,
+                "max": TG_CAPTION_MAX_CHARS, "transport": dest.transport}
     except ConfigError as e:
         state.audit.write({"tool": TOOL_NAME, "status": "rejected",
                            "reason": "transport_unavailable", "channel": dest.name})
