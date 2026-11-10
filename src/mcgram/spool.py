@@ -22,7 +22,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from .spool_safety import probe_dir
+from .spool_safety import make_private_dirs, probe_dir
 
 log = logging.getLogger("mcgram.spool")
 
@@ -101,10 +101,7 @@ class Spool:
         return self._dir / f"{key}.{kind}.json"
 
     def _ensure_dir(self) -> None:
-        # `mkdir(parents=True, mode=...)` applies the mode to the leaf only, so
-        # root and namespace are created separately to keep both at 0700.
-        self._root.mkdir(parents=True, exist_ok=True, mode=0o700)
-        self._dir.mkdir(exist_ok=True, mode=0o700)
+        make_private_dirs(self._dir)
 
     def write(self, key: str, kind: str, payload: dict[str, Any]) -> bool:
         """Atomically write a record, replacing any existing one.

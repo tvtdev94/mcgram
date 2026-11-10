@@ -19,6 +19,22 @@ log = logging.getLogger("mcgram.spool")
 _POSIX = sys.platform != "win32"
 
 
+def make_private_dirs(path: Path) -> None:
+    """Create `path` and every missing directory above it, each at 0700.
+
+    `mkdir(parents=True, mode=...)` applies the mode to the last level only and
+    leaves the ones above it at the umask default (usually 0755), which the
+    POSIX check below then rejects. So every missing level is made one at a time.
+    """
+    missing = []
+    for level in (path, *path.parents):
+        if level.exists():
+            break
+        missing.append(level)
+    for level in reversed(missing):
+        level.mkdir(exist_ok=True, mode=0o700)
+
+
 def probe_dir(root: Path, leaf: Path) -> tuple[bool, str]:
     """(ok, reason) for a spool root and every directory down to `leaf`.
 
@@ -39,11 +55,7 @@ def probe_dir(root: Path, leaf: Path) -> tuple[bool, str]:
         if path.is_symlink():
             return False, f"{path} is a symlink"
     try:
-        # One level at a time: `mkdir(parents=True, mode=...)` applies the mode
-        # to the last level only, leaving the ones above it at the umask default.
-        root.mkdir(parents=True, exist_ok=True, mode=0o700)
-        for path in levels[1:]:
-            path.mkdir(exist_ok=True, mode=0o700)
+        make_private_dirs(leaf)
     except OSError as e:
         return False, f"cannot create {leaf}: {e}"
     if _POSIX:
