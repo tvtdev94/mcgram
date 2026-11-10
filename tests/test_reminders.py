@@ -240,6 +240,24 @@ async def test_restart_respects_the_pending_cap(tmp_path: Path) -> None:
     assert len(_on_disk(s)) == 5  # the rest wait on disk for capacity
 
 
+async def test_adopted_reminders_do_not_use_up_this_sessions_own_cap(tmp_path: Path) -> None:
+    s = _settings(tmp_path)  # max_pending = 3
+    later = time.time() + 50
+    publish_from_dead_process(s.spool_root, *((f"r_0000c00{i}", later) for i in range(3)))
+    sched = _scheduler(s, FakeClient(), durable=True)
+    sched.start()
+    try:
+        assert await _until(lambda: len(sched.list()) == 3)
+        for text in ("a", "b", "c"):
+            sched.create(text, delay_s=50)
+        with pytest.raises(LimitError) as exc:
+            sched.create("d", delay_s=50)
+        assert exc.value.kind == "reminder_max_pending"
+        assert len(sched.list()) == 6
+    finally:
+        sched.shutdown()
+
+
 async def test_cancel_request_from_another_session_is_honoured(tmp_path: Path) -> None:
     s = _settings(tmp_path)
     s.broker.enabled = True
@@ -257,6 +275,27 @@ async def test_cancel_request_from_another_session_is_honoured(tmp_path: Path) -
         sched.shutdown()
     assert _on_disk(s) == set()
     assert client.sent == []
+
+
+async def test_heartbeat_is_written_on_its_own_cadence_only_while_owning_reminders(
+    tmp_path: Path,
+) -> None:
+    s = _settings(tmp_path)
+    s.broker.enabled, s.broker.poll_interval_s = True, 0.02  # fast watcher ticks
+    sched = _scheduler(s, FakeClient(), durable=True)
+    heartbeats = Spool(s.spool_root, "reminders")
+    sched.start()
+    try:
+        await asyncio.sleep(0.2)
+        assert heartbeats.keys("alive") == set()  # nothing owned, nothing to prove
+        sched.create("later", delay_s=50)
+        await asyncio.sleep(0.1)  # the watcher takes over beating on its next tick
+        [owner] = heartbeats.keys("alive")
+        first = heartbeats.read(owner, "alive")
+        await asyncio.sleep(0.3)  # many ticks, far less than one beat interval
+        assert heartbeats.read(owner, "alive") == first
+    finally:
+        sched.shutdown()
 
 
 async def test_watch_loop_survives_a_failing_tick(
