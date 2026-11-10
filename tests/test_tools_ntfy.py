@@ -283,7 +283,7 @@ async def test_long_text_on_ntfy_goes_as_attachment_with_one_line_caption(
 async def test_edit_message_on_ntfy_is_unsupported_without_network(
     ntfy_app_state, httpx_mock
 ) -> None:
-    out = await edit_message.handle(ntfy_app_state, message_id="123", text="new")
+    out = await edit_message.handle(ntfy_app_state, message_id="kGWnD1QOQTWv", text="new")
     assert out["error"] == "transport_unsupported"
     assert httpx_mock.get_requests() == []
     assert _audit(ntfy_app_state.audit.path)[-1]["reason"] == "transport_unsupported"

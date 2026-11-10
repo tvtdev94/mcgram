@@ -80,20 +80,22 @@ async def handle(state: AppState, *, message_id: Any, text: str,
                  parse_mode: str | None = None) -> dict[str, Any]:
     if not text or not isinstance(text, str):
         return {"error": "invalid_input", "reason": "text_required"}
-    msg_id = _normalize_id(message_id)
-    if msg_id is None:
-        return {"error": "invalid_input", "reason": "invalid_message_id"}
     try:
         dest = state.settings.resolve_destination(channel)
     except ConfigError as e:
         state.audit.write({"tool": TOOL_NAME, "status": "rejected",
                            "reason": "unknown_channel", "channel": channel})
         return {"error": "invalid_input", "reason": "unknown_channel", "detail": str(e)}
+    # Before the ID check: ntfy message IDs are alphanumeric, so an ntfy edit
+    # would otherwise be misreported as a bad ID instead of unsupported.
     if dest.transport == "ntfy":
         state.audit.write({"tool": TOOL_NAME, "status": "rejected",
                            "reason": "transport_unsupported", "channel": dest.name})
         return {"error": "transport_unsupported", "transport": "ntfy",
                 "reason": "ntfy cannot edit a sent message; send a new one instead"}
+    msg_id = _normalize_id(message_id)
+    if msg_id is None:
+        return {"error": "invalid_input", "reason": "invalid_message_id"}
     max_text = _MAX_TEXT_BY_TRANSPORT.get(dest.transport, _DEFAULT_MAX_TEXT)
     if len(text) > max_text:
         return {"error": "invalid_input", "reason": "text_too_long",
