@@ -149,6 +149,8 @@ class AskServer:
                 question=req["question"],
                 options=req["options"],
                 timeout_s=req["timeout_s"],
+                multi_select=req.get("multi_select", False),
+                columns=req.get("columns", 1),
             )
             self._write_answer(key, result["value"], result["source"])
         except asyncio.CancelledError:
@@ -161,7 +163,7 @@ class AskServer:
             self._write_answer(key, "", "internal_error")
 
     def _write_answer(
-        self, key: str, value: str, source: str, *, detail: str | None = None
+        self, key: str, value: str | list[str], source: str, *, detail: str | None = None
     ) -> None:
         now = time.time()
         payload: dict[str, Any] = {
@@ -208,6 +210,11 @@ def _well_formed(req: dict[str, Any]) -> bool:
         return False
     timeout = req.get("timeout_s")
     if not isinstance(timeout, int) or isinstance(timeout, bool) or timeout <= 0:
+        return False
+    if not isinstance(req.get("multi_select", False), bool):
+        return False
+    columns = req.get("columns", 1)
+    if not isinstance(columns, int) or isinstance(columns, bool) or not 1 <= columns <= 4:
         return False
     options = req.get("options")
     return options is None or (

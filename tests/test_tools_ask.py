@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+import pytest
+
 from mcgram.ask_registry import AskRegistry
 from mcgram.runtime import AppState
 from mcgram.tools import ask
@@ -52,6 +54,11 @@ async def test_timeout_capped(app_state: AppState, httpx_mock) -> None:
         url="https://api.telegram.org/botfake-token/editMessageText",
         json={"ok": True, "result": True},
     )
+    # A timed-out question also loses its keyboard.
+    httpx_mock.add_response(
+        url="https://api.telegram.org/botfake-token/editMessageReplyMarkup",
+        json={"ok": True, "result": True},
+    )
     # Caller asks for 100s but limit forces 1s → should timeout fast
     out = await ask.handle(app_state, question="?", options=None, timeout_s=100)
     assert out["source"] == "timeout"
@@ -93,6 +100,25 @@ async def test_happy_button(app_state: AppState, httpx_mock) -> None:
     await drv
     assert out["value"] == "Yes"
     assert out["source"] == "button"
+
+
+@pytest.mark.parametrize(
+    ("args", "reason"),
+    [
+        ({"columns": 0}, "columns_out_of_range"),
+        ({"columns": 5}, "columns_out_of_range"),
+        ({"columns": True}, "columns_out_of_range"),
+        ({"multi_select": "yes", "options": ["a"]}, "multi_select_must_be_bool"),
+        ({"multi_select": True}, "multi_select_requires_options"),
+        ({"multi_select": True, "options": []}, "multi_select_requires_options"),
+    ],
+)
+async def test_layout_arguments_are_validated_before_posting(
+    app_state: AppState, args: dict[str, Any], reason: str
+) -> None:
+    app_state.ask_registry = AskRegistry()
+    out = await ask.handle(app_state, question="?", **args)
+    assert (out["error"], out["reason"]) == ("invalid_input", reason)
 
 
 # Silence "unused" import in some envs

@@ -4,18 +4,22 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from mcgram.audit import AuditLog
+from mcgram.broker_wiring import build_reminder_store
 from mcgram.config import Settings
 from mcgram.errors import LimitError
 from mcgram.rate_limiter import RateLimiter
 from mcgram.reminders import ReminderScheduler
 from mcgram.runtime import AppState
+from mcgram.spool import Spool
 from mcgram.update_dispatcher import UpdateDispatcher
+from tests.test_reminder_spool import publish_from_dead_process
 
 
 class FakeClient:
@@ -28,9 +32,11 @@ class FakeClient:
 
 
 def _scheduler(
-    s: Settings, client: Any, audit: AuditLog | None = None
+    s: Settings, client: Any, audit: AuditLog | None = None, *, durable: bool = False
 ) -> ReminderScheduler:
-    """Build a scheduler over a minimal AppState — delivery routes via dispatch."""
+    """Build a scheduler over a minimal AppState — delivery routes via dispatch.
+
+    `durable` adds the production disk store (as `server._wire_phase3` does)."""
     state = AppState(
         settings=s,
         dispatcher=UpdateDispatcher(),
@@ -38,7 +44,7 @@ def _scheduler(
         audit=audit or AuditLog(s.audit.path),
         client=client,
     )
-    return ReminderScheduler(state)
+    return ReminderScheduler(state, store=build_reminder_store(s) if durable else None)
 
 
 def _settings(tmp_path: Path) -> Settings:
@@ -152,3 +158,130 @@ async def test_shutdown_cancels_all(tmp_path: Path) -> None:
     sched.shutdown()
     await asyncio.sleep(0.05)
     assert sched.list() == []
+
+
+# --- durability: reminders survive a restart ---------------------------------
+
+
+async def _until(predicate: Any, timeout: float = 5.0) -> bool:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while loop.time() < deadline:
+        if predicate():
+            return True
+        await asyncio.sleep(0.01)
+    return False
+
+
+def _on_disk(s: Settings) -> set[str]:
+    return Spool(s.spool_root, "reminders").keys("rec")
+
+
+def test_constructing_a_durable_scheduler_needs_no_event_loop(tmp_path: Path) -> None:
+    sched = _scheduler(_settings(tmp_path), FakeClient(), durable=True)
+    assert sched.store is not None  # built outside any running loop without error
+
+
+async def test_saved_on_create_removed_on_fire_and_on_cancel(tmp_path: Path) -> None:
+    s = _settings(tmp_path)
+    client = FakeClient()
+    sched = _scheduler(s, client, durable=True)
+    fired = sched.create("soon", delay_s=1)["reminder_id"]
+    cancelled = sched.create("never", delay_s=50)["reminder_id"]
+    assert _on_disk(s) == {fired, cancelled}
+    assert sched.cancel(cancelled)
+    assert _on_disk(s) == {fired}
+    assert await _until(lambda: client.sent == ["⏰ soon"])
+    assert await _until(lambda: _on_disk(s) == set())
+
+
+async def test_shutdown_keeps_saved_reminders_for_the_next_process(tmp_path: Path) -> None:
+    s = _settings(tmp_path)
+    sched = _scheduler(s, FakeClient(), durable=True)
+    rid = sched.create("later", delay_s=50)["reminder_id"]
+    sched.shutdown()
+    await asyncio.sleep(0.05)
+    assert _on_disk(s) == {rid}
+
+
+async def test_restart_fires_overdue_reminders_once_marked_late(tmp_path: Path) -> None:
+    s = _settings(tmp_path)
+    now = time.time()
+    publish_from_dead_process(s.spool_root, ("r_0000a001", now - 30), ("r_0000a002", now + 50))
+    client = FakeClient()
+    sched = _scheduler(s, client, durable=True)
+    sched.start()
+    try:
+        assert await _until(lambda: len(client.sent) == 1)
+        assert client.sent[0].startswith("⏰ from r_0000a001\n\n(late: was due ")
+        # Not yet due: adopted and pending, not fired early.
+        assert [r["id"] for r in sched.list()] == ["r_0000a002"]
+        assert await _until(lambda: _on_disk(s) == {"r_0000a002"})
+        await asyncio.sleep(0.1)
+        assert len(client.sent) == 1  # fired exactly once
+    finally:
+        sched.shutdown()
+    adopted = [r for r in _audit(s.audit.path) if r["tool"] == "_reminder_adopt"]
+    assert {r["rid"]: r["late"] for r in adopted} == {"r_0000a001": True, "r_0000a002": False}
+
+
+async def test_restart_respects_the_pending_cap(tmp_path: Path) -> None:
+    s = _settings(tmp_path)  # max_pending = 3
+    later = time.time() + 50
+    publish_from_dead_process(s.spool_root, *((f"r_0000b00{i}", later) for i in range(5)))
+    sched = _scheduler(s, FakeClient(), durable=True)
+    sched.start()
+    try:
+        assert await _until(lambda: len(sched.list()) == 3)
+        await asyncio.sleep(0.1)
+        assert len(sched.list()) == 3
+    finally:
+        sched.shutdown()
+    assert len(_on_disk(s)) == 5  # the rest wait on disk for capacity
+
+
+async def test_cancel_request_from_another_session_is_honoured(tmp_path: Path) -> None:
+    s = _settings(tmp_path)
+    s.broker.enabled = True
+    s.broker.poll_interval_s = 0.02
+    client = FakeClient()
+    sched = _scheduler(s, client, durable=True)
+    sched.start()
+    try:
+        rid = sched.create("stop me", delay_s=50)["reminder_id"]
+        other_session = build_reminder_store(s)
+        assert other_session is not None
+        assert other_session.request_cancel(rid) is not None
+        assert await _until(lambda: sched.list() == [])
+    finally:
+        sched.shutdown()
+    assert _on_disk(s) == set()
+    assert client.sent == []
+
+
+async def test_watch_loop_survives_a_failing_tick(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    s = _settings(tmp_path)
+    s.broker.enabled = True
+    s.broker.poll_interval_s = 0.02
+    sched = _scheduler(s, FakeClient(), durable=True)
+    assert sched.store is not None
+    real = sched.store.take_cancel_requests
+    calls = {"n": 0}
+
+    def flaky(rids: list[str]) -> list[str]:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError("disk hiccup")
+        return real(rids)
+
+    monkeypatch.setattr(sched.store, "take_cancel_requests", flaky)
+    sched.start()
+    try:
+        rid = sched.create("stop me", delay_s=50)["reminder_id"]
+        assert sched.store.request_cancel(rid) is not None
+        assert await _until(lambda: sched.list() == [])
+    finally:
+        sched.shutdown()
+    assert calls["n"] > 1

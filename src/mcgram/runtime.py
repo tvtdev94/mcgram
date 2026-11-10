@@ -34,6 +34,10 @@ class AppState:
     # ask_registry is set ONLY while this process owns the Telegram poll loop —
     # resolving an ask needs the inbound update that only the poller receives.
     ask_registry: Any | None = None
+    # Set once at boot, and only when `broker.enabled` and the spool passed its
+    # safety probe. Lets a session that does NOT poll hand `ask` to the one that
+    # does (see ask_broker / ask_server). None means "no broker on this machine".
+    ask_broker: Any | None = None
     reminders: Any | None = None
     # Telegram poll-loop ownership. Multiple mcgram processes may run at once
     # (one per Claude Code session), but `getUpdates` allows a single client per

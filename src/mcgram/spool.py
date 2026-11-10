@@ -33,7 +33,9 @@ log = logging.getLogger("mcgram.spool")
 # would make `q_ab\n` a second key that looks identical to `q_ab` in every log.
 _KEY_RE = re.compile(r"[a-z]_[0-9a-f]{8,32}")
 _UPDATE_KEY_RE = re.compile(r"u[0-9]{1,20}")
-_KIND_RE = re.compile(r"[a-z]+")
+# Digits after the first letter let a kind carry a generation tag (a reminder
+# claim is `claim<owner-token>`); still no separators, dots, or uppercase.
+_KIND_RE = re.compile(r"[a-z][a-z0-9]*")
 
 # json.load can blow the stack on deeply nested input and json.dump raises
 # TypeError on values it cannot serialize. Neither is an OSError, and both must

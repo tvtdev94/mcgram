@@ -15,6 +15,21 @@ from mcgram.tg_client import TelegramClient
 from mcgram.update_dispatcher import UpdateDispatcher
 
 
+@pytest.fixture(autouse=True)
+def _isolated_spool_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep every test out of the real ~/.mcgram/spool.
+
+    The spool root is anchored to the user's home, not to the test config, and
+    a reminder saved there would be adopted and really sent by the user's next
+    mcgram session. Redirecting the home also covers child processes, which
+    inherit the environment.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+
+
 @pytest.fixture
 def settings(tmp_path: Path) -> Settings:
     cfg = tmp_path / "config.yaml"
