@@ -70,6 +70,10 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/mcgram"]
 
+[tool.hatch.build.targets.sdist]
+# Agent worktrees are full copies of the repo; never ship them.
+exclude = [".claude/", "build-out/"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py311"
