@@ -37,7 +37,7 @@ f127960 and was kept as is. Its only change is carrying the new `ask` fields.
 
 ## New and changed modules (wc -l)
 
-New: `ask_via_broker.py` 106, `broker_wiring.py` 134, `reminder_spool.py` 154, `tools/_ask_refusal.py` 70.
+New: `ask_via_broker.py` 106, `broker_wiring.py` 130, `reminder_spool.py` 154, `tools/_ask_refusal.py` 68.
 Changed: `tools/ask.py` 181, `reminders.py` 199, `server.py` 270, `ask_registry.py` 231 (item 8 allowed this), `ask_server.py` 222 (raw; under 200 code-only).
 
 ## Deviations from file ownership
