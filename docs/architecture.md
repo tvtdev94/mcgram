@@ -200,7 +200,7 @@ the polling session serves the request through the unchanged
 
 ```
 ~/.mcgram/spool/<config-id>/asks/
-├── u0.heartbeat.json   owner, every tick: {pid, at, protocol, expires_at}
+├── u0.heartbeat.json   owner, every min(10s, heartbeat_stale_s/6): {pid, at, protocol, expires_at}
 ├── q_x.request.json    requester: {question, options, multi_select, columns,
 │                        chat_id, timeout_s, requester_pid, expires_at}
 ├── q_x.taken.json      owner, write_exclusive (O_EXCL) — a request is served once

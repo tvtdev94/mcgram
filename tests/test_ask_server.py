@@ -142,6 +142,20 @@ async def test_run_publishes_heartbeat(tmp_path: Path) -> None:
         task.cancel()
 
 
+async def test_heartbeat_is_not_rewritten_on_every_poll_tick(tmp_path: Path) -> None:
+    """The scan runs every few hundred ms; the heartbeat only has to beat well
+    inside `heartbeat_stale_s`, not replace a file several times a second."""
+    server, spool, _, _ = _server(tmp_path, poll_interval_s=0.01, heartbeat_stale_s=90)
+    task = asyncio.create_task(server.run())
+    try:
+        assert await _until(lambda: spool.read(HEARTBEAT_KEY, HEARTBEAT_KIND) is not None)
+        first = spool.read(HEARTBEAT_KEY, HEARTBEAT_KIND)
+        await asyncio.sleep(0.2)  # ~20 poll ticks
+        assert spool.read(HEARTBEAT_KEY, HEARTBEAT_KIND) == first
+    finally:
+        task.cancel()
+
+
 # --- serving ----------------------------------------------------------------
 
 
