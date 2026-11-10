@@ -6,13 +6,18 @@ import asyncio
 import logging
 import secrets
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from .tg_client import TelegramClient
 
 log = logging.getLogger("mcgram.ask")
+
+#: Prefix marking a toggled-on option in a multi-select keyboard.
+CHECK = "✅ "
+#: callback_data suffix of the multi-select "Done" button (never a digit).
+DONE = "done"
 
 
 @dataclass
@@ -23,14 +28,32 @@ class PendingAsk:
     chat_id: int
     options: list[str] | None
     posted_at: float  # epoch seconds; only replies posted AFTER this resolve the ask
+    multi_select: bool = False
+    columns: int = 1
+    selected: set[int] = field(default_factory=set)
+    client: Any = None  # for re-drawing the keyboard as options toggle
 
 
-def _build_keyboard(question_id: str, options: list[str]) -> dict[str, Any]:
-    """One button per row. callback_data encodes question_id + option index."""
-    rows = [
-        [{"text": opt, "callback_data": f"{question_id}:{idx}"}]
+def _build_keyboard(
+    question_id: str,
+    options: list[str],
+    *,
+    columns: int = 1,
+    multi_select: bool = False,
+    selected: set[int] | None = None,
+) -> dict[str, Any]:
+    """`columns` buttons per row. callback_data encodes question_id + option index.
+
+    Multi-select marks toggled options with a check and adds a final "Done" row.
+    """
+    chosen = selected or set()
+    buttons = [
+        {"text": (CHECK if idx in chosen else "") + opt, "callback_data": f"{question_id}:{idx}"}
         for idx, opt in enumerate(options)
     ]
+    rows = [buttons[i:i + columns] for i in range(0, len(buttons), columns)]
+    if multi_select:
+        rows.append([{"text": "Done", "callback_data": f"{question_id}:{DONE}"}])
     return {"inline_keyboard": rows}
 
 
@@ -52,9 +75,22 @@ class AskRegistry:
         question: str,
         options: list[str] | None,
         timeout_s: int,
+        multi_select: bool = False,
+        columns: int = 1,
     ) -> dict[str, Any]:
+        """Post, wait, record the outcome in the chat.
+
+        With `multi_select` (requires options) the result `value` is a list —
+        the selected labels in option order, `[text]` for a typed reply, `[]` on
+        timeout — so a caller never has to branch on the type. Otherwise it is
+        a string, as it always was.
+        """
+        multi_select = bool(multi_select and options)
         q_id = "q_" + secrets.token_hex(4)
-        reply_markup = _build_keyboard(q_id, options) if options else None
+        reply_markup = (
+            _build_keyboard(q_id, options, columns=columns, multi_select=multi_select)
+            if options else None
+        )
         msg = await client.send_message(chat_id, question, reply_markup=reply_markup)
         loop = asyncio.get_running_loop()
         fut: asyncio.Future = loop.create_future()
@@ -65,6 +101,9 @@ class AskRegistry:
             chat_id=chat_id,
             options=options,
             posted_at=time.time(),
+            multi_select=multi_select,
+            columns=columns,
+            client=client,
         )
         try:
             value, source = await asyncio.wait_for(fut, timeout=timeout_s)
@@ -72,7 +111,8 @@ class AskRegistry:
             return {"value": value, "source": source, "question_id": q_id}
         except TimeoutError:
             await _mark_timed_out(client, chat_id, msg["message_id"], question)
-            return {"value": "", "source": "timeout", "question_id": q_id}
+            return {"value": [] if multi_select else "", "source": "timeout",
+                    "question_id": q_id}
         finally:
             self._pending.pop(q_id, None)
 
@@ -87,10 +127,8 @@ class AskRegistry:
         data = cq.get("data", "")
         q_id, _, idx_str = data.partition(":")
         pending = self._pending.get(q_id)
-        if pending and pending.options and idx_str.isdigit():
-            idx = int(idx_str)
-            if 0 <= idx < len(pending.options) and not pending.future.done():
-                pending.future.set_result((pending.options[idx], "button"))
+        if pending and pending.options and not pending.future.done():
+            await _apply_tap(pending, idx_str)
         # Always answer the callback so Telegram stops showing a spinner.
         # The client reference travels via the registry's known client (passed at open()).
         # Since handle_update lives on AppState, we look up the client via cq's bot wiring:
@@ -113,7 +151,7 @@ class AskRegistry:
         )
         for p in candidates:
             if not p.future.done():
-                p.future.set_result((text, "freetext"))
+                p.future.set_result(([text] if p.multi_select else text, "freetext"))
                 break
 
     # Hook injected by server bootstrap so we can call answer_callback_query
@@ -124,12 +162,39 @@ class AskRegistry:
         self._answer_hook = hook
 
 
+async def _apply_tap(pending: PendingAsk, idx_str: str) -> None:
+    """Resolve on a single-select tap or on Done; toggle and redraw otherwise."""
+    options = pending.options or []
+    if pending.multi_select and idx_str == DONE:
+        chosen = [opt for idx, opt in enumerate(options) if idx in pending.selected]
+        pending.future.set_result((chosen, "button"))
+        return
+    if not idx_str.isdigit() or not 0 <= int(idx_str) < len(options):
+        return
+    idx = int(idx_str)
+    if not pending.multi_select:
+        pending.future.set_result((options[idx], "button"))
+        return
+    pending.selected ^= {idx}
+    try:
+        await pending.client.edit_message_reply_markup(
+            pending.chat_id, pending.message_id,
+            reply_markup=_build_keyboard(
+                pending.question_id, options, columns=pending.columns,
+                multi_select=True, selected=pending.selected,
+            ),
+        )
+    except Exception:
+        # The selection is tracked here regardless; only the checkmarks lag.
+        log.debug("redrawing multi-select keyboard failed (non-fatal)", exc_info=True)
+
+
 async def _mark_answered(
     client: TelegramClient,
     chat_id: int,
     message_id: int,
     question: str,
-    value: str,
+    value: str | list[str],
     source: str,
 ) -> None:
     """Record the operator's answer in the chat by rewriting the question message.
@@ -138,9 +203,10 @@ async def _mark_answered(
     chat history of what was picked. Append the choice, then drop the buttons.
     """
     label = "Đã chọn" if source == "button" else "Trả lời"
+    shown = (", ".join(value) or "—") if isinstance(value, list) else value
     try:
         await client.edit_message_text(
-            chat_id, message_id, f"{question}\n\n✅ {label}: {value}"
+            chat_id, message_id, f"{question}\n\n✅ {label}: {shown}"
         )
     except Exception:
         log.debug("edit_message_text on answer failed (non-fatal)", exc_info=True)
@@ -157,7 +223,9 @@ async def _strip_keyboard(client: TelegramClient, chat_id: int, message_id: int)
 async def _mark_timed_out(
     client: TelegramClient, chat_id: int, message_id: int, question: str
 ) -> None:
+    """Say so in the chat and drop the buttons, so nobody taps a dead question."""
     try:
-        await client.edit_message_text(chat_id, message_id, f"{question}\n\n(timed out)")
+        await client.edit_message_text(chat_id, message_id, f"{question}\n\n⏱ timed out")
     except Exception:
         log.debug("edit_message_text on timeout failed (non-fatal)", exc_info=True)
+    await _strip_keyboard(client, chat_id, message_id)

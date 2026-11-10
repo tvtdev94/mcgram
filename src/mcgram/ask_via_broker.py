@@ -73,6 +73,8 @@ async def ask_via_broker(
         # Telegram error, shutdown). Reporting it as a timeout would tell
         # Claude the operator ignored a question they never saw.
         error = None if source in _ANSWER_SOURCES else str(source)
+        if error is None and not _value_matches(value, extra):
+            error = "internal_error"  # a malformed answer file is not an answer
     state.audit.write({
         "tool": TOOL_NAME, "status": "error" if error else "ok", "via": "broker",
         "channel": dest.name, "question_id": q_id, "source": source, "ms": ms,
@@ -87,6 +89,13 @@ async def ask_via_broker(
 
 def _empty(extra: dict[str, Any]) -> Any:
     return [] if extra.get("multi_select") else ""
+
+
+def _value_matches(value: Any, extra: dict[str, Any]) -> bool:
+    """Multi-select answers are lists of labels; everything else is a string."""
+    if extra.get("multi_select"):
+        return isinstance(value, list) and all(isinstance(v, str) for v in value)
+    return isinstance(value, str)
 
 
 def _reject(

@@ -87,6 +87,8 @@ class AskBroker:
         options: list[str] | None,
         chat_id: int,
         timeout_s: int,
+        multi_select: bool = False,
+        columns: int = 1,
     ) -> bool:
         """Publish a question for the owner to post. False if the spool refused it."""
         now = time.time()
@@ -100,6 +102,8 @@ class AskBroker:
                 "options": options,
                 "chat_id": chat_id,
                 "timeout_s": timeout_s,
+                "multi_select": multi_select,
+                "columns": columns,
                 "requester_pid": os.getpid(),
                 "created_at": now,
                 # Padded past the caller's deadline so the owner can still write
@@ -108,7 +112,7 @@ class AskBroker:
             },
         )
 
-    async def wait_for_answer(self, q_id: str, *, timeout_s: int) -> dict[str, Any] | None:
+    async def wait_for_answer(self, q_id: str, *, timeout_s: float) -> dict[str, Any] | None:
         """Poll for the owner's answer. None means the deadline passed.
 
         The read after the loop is not redundant: an answer written during the

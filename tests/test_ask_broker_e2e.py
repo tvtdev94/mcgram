@@ -119,6 +119,25 @@ async def test_button_answer_reaches_the_non_polling_session(pair: Any) -> None:
     assert requester.client.sent == []  # only the owner ever posts
 
 
+async def test_multi_select_and_columns_travel_through_the_broker(pair: Any) -> None:
+    requester, owner, registry = pair
+
+    async def tick_two_then_done() -> None:
+        await _until(lambda: bool(registry._pending))
+        q_id = next(iter(registry._pending))
+        for n, suffix in enumerate(("0", "2", "done")):
+            await registry.handle_update(
+                {"callback_query": {"id": f"cb{n}", "data": f"{q_id}:{suffix}"}})
+
+    taps = asyncio.create_task(tick_two_then_done())
+    out = await ask.handle(requester, question="Which envs?", options=["dev", "stg", "prod"],
+                           multi_select=True, columns=2, timeout_s=5)
+    await taps
+    assert (out["value"], out["source"]) == (["dev", "prod"], "button")
+    rows = owner.client.sent[0]["reply_markup"]["inline_keyboard"]
+    assert [len(r) for r in rows] == [2, 1, 1]  # 2 per row, then the Done row
+
+
 async def test_freetext_answer_reaches_the_non_polling_session(pair: Any) -> None:
     requester, _owner, registry = pair
     reply = asyncio.create_task(_operator(registry, lambda q: {"message": {
