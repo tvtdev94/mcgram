@@ -189,11 +189,20 @@ Owner (task nen, khong trong dispatcher):
 
 | Phase | Name | Status |
 |-------|------|--------|
-| 1 | [Spool foundation](./phase-01-spool-foundation.md) | Pending |
-| 2 | [Ask broker core](./phase-02-ask-broker-core.md) | Pending |
-| 3 | [Wire ask paths](./phase-03-wire-ask-paths.md) | Pending |
-| 4 | [Reminder broker](./phase-04-reminder-broker.md) | Pending |
-| 5 | [Docs and verification](./phase-05-docs-and-verification.md) | Pending |
+| 1 | [Spool foundation](./phase-01-spool-foundation.md) | Done |
+| 2 | [Ask broker core](./phase-02-ask-broker-core.md) | Done |
+| 3 | [Wire ask paths](./phase-03-wire-ask-paths.md) | Done |
+| 4 | [Reminder broker](./phase-04-reminder-broker.md) | Done (with deviations) |
+| 5 | [Docs and verification](./phase-05-docs-and-verification.md) | Done for code, tests, architecture, threat model, README, SKILL; `mcgram doctor` spool row, `config.example.yaml`, CHANGELOG and version bump left to integration |
+
+Deviations and the reasons for them are in
+`../reports/stream-a-261109-2148-ask-reminders-report.md`. In short: with the
+broker off, `ask` keeps `polling_not_owned` rather than the phase-3
+`broker_unavailable` (acceptance requires identical behaviour when off). The
+reminder store is always on, because durable reminders came after this plan.
+So dead-owner records are adopted rather than reaped, `shutdown()` keeps
+records, and `start()`/`shutdown()` stay sync. The owner supervisor lives in
+`broker_wiring.py` rather than `poll_ownership.py`.
 
 Phu thuoc tuyen tinh: 1 → 2 → 3 → 5, va 1 → 4 → 5.
 
