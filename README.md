@@ -266,7 +266,7 @@ back.
 | | Polling instance | Other instances |
 |---|:---:|:---:|
 | `send_message` / `send_file` / `send_video` | ✅ | ✅ |
-| `set_reminder` / `cancel_reminder` / `list_reminders` | ✅ | ✅ (other sessions' reminders listed and cancellable with the broker) |
+| `set_reminder` / `cancel_reminder` / `list_reminders` | ✅ | ✅ (other sessions' reminders listed and cancellable, broker or not) |
 | `ask` | ✅ | ✅ with broker, ❌ `polling_not_owned` without |
 
 The broker is **off by default** because it changes the trust boundary of
@@ -288,13 +288,13 @@ Rarely what you want.
 
 ## Known limitations
 
-- **Reminders survive restarts, at least once** — pending reminders are saved
-  in `~/.mcgram/spool/reminders/`. When the session that set one stops, the
-  next running (or restarted) mcgram takes it over, and one that came due in
-  the meantime fires right away, marked late. A reminder more than 24h overdue
-  is dropped. A crash between sending and recording can deliver it twice.
-  Without the broker, `list_reminders` shows only the current session's
-  reminders.
+- **Reminders survive restarts** — pending reminders are saved in
+  `~/.mcgram/spool/reminders/`. When the session that set one stops, the next
+  running (or restarted) mcgram takes it over, and one that came due in the
+  meantime fires right away, marked late. A reminder more than 24h overdue is
+  dropped. Only a crash in the instant between sending and recording it as
+  sent can deliver one twice. `list_reminders` and `cancel_reminder` reach
+  every session's reminders, broker or not.
 - **`ask` blocks the MCP call** — keep timeouts short or Claude waits idle.
 - **`ask` is Telegram-only** — ntfy.sh has no 2-way input. On ntfy channels, `ask` returns `transport_unsupported` without contacting the network.
 - **ntfy.sh public topics are URL-discoverable** — anyone with the topic name can subscribe. mcgram generates 64-bit-entropy topics, but **don't send secrets / PII** unless you self-host ntfy with auth.
