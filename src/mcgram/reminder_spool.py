@@ -111,10 +111,16 @@ class ReminderSpool:
         A record we cannot read counts as ours — on Windows a concurrent reader
         can make the read fail, and skipping a due reminder is worse.
         """
-        if self._spool.read(rid, _DONE_KIND) is not None:
+        if self._is_finished(rid):
             return False
         rec = self._spool.read(rid, "rec")
         return rec is None or rec.get("owner") == self._instance
+
+    def _is_finished(self, rid: str) -> bool:
+        """The tombstone exists. Its content is not read: `write_exclusive`
+        creates the file before filling it, so it can be empty for a moment."""
+        path = self._spool.path_for(rid, _DONE_KIND)
+        return path is not None and path.exists()
 
     def _owner_state(self, rec: dict[str, Any], now: float) -> str:
         """"alive", "dead" (pid gone), or "silent" (pid runs, heartbeat stale)."""
@@ -180,7 +186,7 @@ class ReminderSpool:
             return None
         # The claim file stays until it expires: removing it now would let an
         # instance still holding the old record win the same claim again.
-        if self._spool.read(rid, _DONE_KIND) is not None:
+        if self._is_finished(rid):
             log.info("reminder %s was cancelled or already fired; dropping it", rid)
             self.remove_record(rid)
             return None

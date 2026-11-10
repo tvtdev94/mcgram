@@ -139,3 +139,14 @@ def test_owner_is_judged_by_its_heartbeat_not_only_its_pid(tmp_path: Path, beati
     store = _store(tmp_path)
     assert store.orphans() == []
     assert [o["rid"] for o in store.orphans()] == ([] if beating else ["r_0000f00d"])
+
+
+def test_tombstone_still_being_written_already_stops_the_fire(tmp_path: Path) -> None:
+    # write_exclusive creates the file before filling it, so a reader can find
+    # it empty; its existence alone must count as "cancelled or fired".
+    store = _store(tmp_path)
+    _publish(store, "r_0000beef")
+    done = Spool(tmp_path, "reminders").path_for("r_0000beef", "done")
+    assert done is not None
+    done.write_bytes(b"")
+    assert store.still_mine("r_0000beef") is False
