@@ -7,6 +7,8 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-11-14
+
 ### Changed
 - **BREAKING: `ask` is button-only.** `options` is now required (an `ask` without it
   returns `invalid_input` / `options_required`), and typed messages no longer
