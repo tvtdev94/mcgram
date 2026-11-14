@@ -84,7 +84,7 @@ class AskBroker:
         q_id: str,
         *,
         question: str,
-        options: list[str] | None,
+        options: list[str],
         chat_id: int,
         timeout_s: int,
         multi_select: bool = False,
@@ -117,7 +117,7 @@ class AskBroker:
 
         The read after the loop is not redundant: an answer written during the
         last poll interval would otherwise be missed, and `close_request` would
-        then unlink it — silently swallowing what the operator actually typed.
+        then unlink it — silently swallowing what the operator actually answered.
         """
         deadline = time.monotonic() + timeout_s
         holders: set[int] = set()

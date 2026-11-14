@@ -139,15 +139,6 @@ async def test_multi_select_and_columns_travel_through_the_broker(pair: Any) -> 
     assert [len(r) for r in rows] == [2, 1, 1]  # 2 per row, then the Done row
 
 
-async def test_freetext_answer_reaches_the_non_polling_session(pair: Any) -> None:
-    requester, _owner, registry = pair
-    reply = asyncio.create_task(_operator(registry, lambda q: {"message": {
-        "chat": {"id": OPERATOR}, "text": "after lunch", "date": int(time.time()) + 5}}))
-    out = await ask.handle(requester, question="When?", timeout_s=5)
-    await reply
-    assert (out["value"], out["source"]) == ("after lunch", "freetext")
-
-
 @pytest.mark.parametrize(
     ("post_delay_s", "edit_delay_s", "source", "chat_mark"),
     [
@@ -198,7 +189,7 @@ async def test_owner_side_failure_is_reported_as_an_error_not_a_timeout(
         serve_while_owner(owner, Spool(settings.spool_root, ASK_NAMESPACE)))
     try:
         assert await _until(lambda: requester.ask_broker.owner_alive()[0])
-        out = await ask.handle(requester, question="?", timeout_s=5)
+        out = await ask.handle(requester, question="?", options=["ok"], timeout_s=5)
     finally:
         await cancel_task(serving)
     assert out["error"] == "rate_limited"
@@ -294,7 +285,7 @@ async def test_losing_ownership_withdraws_the_heartbeat(pair: Any, tmp_path: Pat
 
 async def test_non_operator_channel_is_rejected_before_writing(pair: Any) -> None:
     requester, owner, _ = pair
-    out = await ask.handle(requester, question="?", channel="side", timeout_s=5)
+    out = await ask.handle(requester, question="?", options=["ok"], channel="side", timeout_s=5)
     assert out["error"] == "ask_requires_operator_chat"
     assert owner.client.sent == [] and requester.client.sent == []
 
@@ -308,7 +299,7 @@ async def test_broker_disabled_keeps_the_original_refusal(tmp_path: Path) -> Non
     requester.poll_owner_pid = 4242
     assert start_ask_broker(requester) is None
     assert requester.ask_broker is None
-    out = await ask.handle(requester, question="?", timeout_s=120)
+    out = await ask.handle(requester, question="?", options=["ok"], timeout_s=120)
     assert out["error"] == "polling_not_owned"
     assert "broker" not in out
     assert not (tmp_path / "spool").exists()  # off means the spool is never touched
@@ -323,7 +314,7 @@ async def test_unsafe_spool_at_boot_leaves_the_broker_off(
     assert start_ask_broker(requester) is None
     assert requester.ask_broker is None
     assert "broker off" in caplog.text
-    out = await ask.handle(requester, question="?", timeout_s=120)
+    out = await ask.handle(requester, question="?", options=["ok"], timeout_s=120)
     assert out["error"] == "polling_not_owned"
 
 
@@ -333,6 +324,6 @@ async def test_spool_write_failure_at_runtime_fails_before_posting(
     requester, owner, _ = pair
     monkeypatch.setattr(requester.ask_broker._spool, "write_exclusive",
                         lambda *a, **k: False)
-    out = await ask.handle(requester, question="?", timeout_s=5)
+    out = await ask.handle(requester, question="?", options=["ok"], timeout_s=5)
     assert out["error"] == "broker_unavailable"
     assert owner.client.sent == [] and requester.client.sent == []

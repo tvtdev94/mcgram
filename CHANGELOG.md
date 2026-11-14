@@ -7,6 +7,15 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- **BREAKING: `ask` is button-only.** `options` is now required (an `ask` without it
+  returns `invalid_input` / `options_required`), and typed messages no longer
+  answer a question; `source` is `button` or `timeout`, never `freetext`. A
+  typed reply was matched to whichever question was oldest by comparing
+  Telegram's timestamp with the local clock, so it could resolve the wrong
+  question or be dropped on a machine whose clock ran ahead. A brokered
+  request without options is refused by the polling session too.
+
 ## [0.6.0] — 2026-11-10
 
 ### Added

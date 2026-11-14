@@ -1,4 +1,6 @@
-"""Tool: ask — post a question, await answer (button/freetext) or timeout.
+"""Tool: ask — post a question with buttons, await a tap or time out.
+
+The operator answers by tapping a button; typed messages are never answers.
 
 Telegram-only: ntfy.sh has no 2-way input. Calls on ntfy channels return
 `transport_unsupported` without contacting any backend.
@@ -28,9 +30,10 @@ def schema() -> dict[str, Any]:
     return {
         "name": TOOL_NAME,
         "description": (
-            "Post a question to a configured Telegram channel and wait for a reply. "
-            "Returns {value, source: button|freetext|timeout, question_id}. "
-            "If options provided, posts inline buttons (`columns` per row, default 1). "
+            "Post a question with inline buttons to a configured Telegram channel and "
+            "wait for the operator to tap one. options is required: typed replies are "
+            "not accepted. Returns {value, source: button|timeout, question_id}. "
+            "Buttons are laid out `columns` per row (default 1). "
             "multi_select=true lets the operator tick several options and press Done; "
             "value is then a list of the selected labels ([] on timeout). "
             "Blocks the MCP call until reply or timeout — keep timeout_s short. "
@@ -43,7 +46,8 @@ def schema() -> dict[str, Any]:
                 "options": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Button labels (omit for freetext-only)",
+                    "minItems": 1,
+                    "description": "Button labels (at least one)",
                 },
                 "timeout_s": {
                     "type": "integer",
@@ -67,7 +71,7 @@ def schema() -> dict[str, Any]:
                     "description": "Buttons per row",
                 },
             },
-            "required": ["question"],
+            "required": ["question", "options"],
         },
     }
 
@@ -90,19 +94,17 @@ async def handle(
             or not 1 <= columns <= MAX_COLUMNS):
         return {"error": "invalid_input", "reason": "columns_out_of_range",
                 "min": 1, "max": MAX_COLUMNS}
-    if multi_select and not options:
-        return {"error": "invalid_input", "reason": "multi_select_requires_options"}
     limits = state.settings.limits
-    if options is not None:
-        if not isinstance(options, list) or not all(isinstance(o, str) for o in options):
-            return {"error": "invalid_input", "reason": "options_must_be_list_of_str"}
-        if len(options) == 0:
-            options = None
-        elif len(options) > limits.ask_options_max:
-            return {
-                "error": "invalid_input", "reason": "too_many_options",
-                "max": limits.ask_options_max,
-            }
+    if not options:
+        return {"error": "invalid_input", "reason": "options_required",
+                "hint": "ask only accepts button answers; pass at least one option"}
+    if not isinstance(options, list) or not all(isinstance(o, str) for o in options):
+        return {"error": "invalid_input", "reason": "options_must_be_list_of_str"}
+    if len(options) > limits.ask_options_max:
+        return {
+            "error": "invalid_input", "reason": "too_many_options",
+            "max": limits.ask_options_max,
+        }
     effective_timeout = timeout_s or state.settings.defaults.ask_timeout_s
     if effective_timeout > limits.ask_timeout_max_s:
         effective_timeout = limits.ask_timeout_max_s

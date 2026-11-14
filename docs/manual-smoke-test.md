@@ -57,7 +57,7 @@ mcgram doctor
 - [ ] "Send me a Telegram message saying hi" → message arrives in your chat
 - [ ] "Send me this README" → file arrives as attachment
 - [ ] "Ask me on Telegram if I want to deploy, options Yes/No" → buttons appear, tap → Claude receives the value
-- [ ] "Ask me an open question" → reply with text → Claude receives the freetext
+- [ ] "Ask me Yes/No", then type a text reply instead of tapping → the question stays open and times out
 - [ ] "Ask me with a 5s timeout, don't reply" → after 5s, message edited to `(timed out)`, Claude proceeds
 - [ ] "Remind me in 10 seconds to check logs" → 10s later, `⏰ check logs` arrives
 - [ ] "List my reminders" → shows the one above

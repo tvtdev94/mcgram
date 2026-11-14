@@ -233,8 +233,8 @@ def _split_owner(
     probe fails at the network layer (api_root is unreachable here), and any
     other error would then be misread as ownership.
     """
-    pa = a.call_tool("ask", {"question": "probe", "timeout_s": 1})
-    pb = b.call_tool("ask", {"question": "probe", "timeout_s": 1})
+    pa = a.call_tool("ask", {"question": "probe", "options": ["ok"], "timeout_s": 1})
+    pb = b.call_tool("ask", {"question": "probe", "options": ["ok"], "timeout_s": 1})
     da, db = _is_degraded(pa), _is_degraded(pb)
     assert da != db, (
         f"expected exactly one degraded instance, got a={pa!r} b={pb!r}"
@@ -324,7 +324,7 @@ def test_ask_works_in_the_owning_instance(tmp_path: Path, repo_root: Path) -> No
     only = _McgramProcess(cfg, repo_root, tmp_path, "only")
     try:
         only.initialize()
-        out = only.call_tool("ask", {"question": "ok?", "timeout_s": 2})
+        out = only.call_tool("ask", {"question": "ok?", "options": ["ok"], "timeout_s": 2})
         assert out.get("error") != "polling_not_owned"
     finally:
         only.close()
@@ -348,7 +348,8 @@ def test_ownership_transfers_when_owner_exits(tmp_path: Path, repo_root: Path) -
         # The supervisor re-checks on an interval; poll the tool until promoted.
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline:
-            if not _is_degraded(waiter.call_tool("ask", {"question": "ok?", "timeout_s": 1})):
+            probe = {"question": "ok?", "options": ["ok"], "timeout_s": 1}
+            if not _is_degraded(waiter.call_tool("ask", probe)):
                 break
         else:
             pytest.fail("degraded instance never took over polling after owner died")
@@ -429,7 +430,8 @@ def test_requester_fails_fast_without_posting_when_the_owner_dies(
         owner.proc.wait(timeout=10)
         _wait(lambda: not _lock_holder_alive(tmp_path), "the owner process to exit")
         t0 = time.monotonic()
-        out = requester.call_tool("ask", {"question": "deploy?", "timeout_s": 120})
+        out = requester.call_tool(
+            "ask", {"question": "deploy?", "options": ["ok"], "timeout_s": 120})
         assert time.monotonic() - t0 < 5
         assert out["error"] == "polling_not_owned"
         assert "no longer running" in out["broker"]

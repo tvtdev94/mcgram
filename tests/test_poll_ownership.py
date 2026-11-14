@@ -190,12 +190,12 @@ async def test_ask_fails_fast_reasons_are_distinct(
     assert state.settings.bot is not None
 
     state.settings.bot.disable_polling = True
-    out = await ask.handle(state, question="?")
+    out = await ask.handle(state, question="?", options=["ok"])
     assert out["error"] == "polling_disabled"
 
     state.settings.bot.disable_polling = False
     state.client = None
-    out = await ask.handle(state, question="?")
+    out = await ask.handle(state, question="?", options=["ok"])
     assert out["error"] == "telegram_not_configured"
 
 

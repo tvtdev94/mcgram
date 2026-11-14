@@ -180,26 +180,6 @@ async def test_serves_a_request_and_writes_the_answer(tmp_path: Path) -> None:
     assert answer["expires_at"] > answer["answered_at"]
 
 
-async def test_uses_the_existing_registry_so_freetext_still_resolves(tmp_path: Path) -> None:
-    """A brokered ask must be an ordinary pending ask — freetext replies land on
-    it through the untouched message handler."""
-    server, spool, reg, cli = _server(tmp_path)
-    _request(spool, options=None)
-    task = asyncio.create_task(server.run())
-    try:
-        assert await _until(lambda: bool(cli.sent))
-        await reg.handle_update({
-            "message": {"chat": {"id": 42}, "text": "ship it", "date": time.time() + 10}
-        })
-        assert await _until(lambda: spool.read(Q, "answer") is not None)
-    finally:
-        task.cancel()
-    answer = spool.read(Q, "answer")
-    assert answer is not None
-    assert answer["value"] == "ship it"
-    assert answer["source"] == "freetext"
-
-
 async def test_expired_request_is_never_served(tmp_path: Path) -> None:
     server, spool, _, cli = _server(tmp_path)
     _request(spool, expires_at=time.time() - 1)
@@ -257,10 +237,11 @@ async def test_malformed_request_is_skipped_not_raised(tmp_path: Path, bad: dict
         ({"options": ["x" * 4097]}, "label"),
         ({"question": "q" * 4097}, "question"),
         ({"timeout_s": 601}, "ask_timeout_max_s"),
-        ({"multi_select": True, "options": None}, "multi_select"),
+        ({"options": None}, "options are required"),
+        ({"options": []}, "options are required"),
     ],
     ids=["foreign-chat", "too-many-options", "long-label", "long-question",
-         "long-timeout", "multi-select-without-options"],
+         "long-timeout", "no-options", "empty-options"],
 )
 async def test_request_outside_the_owners_limits_is_refused_with_an_answer(
     tmp_path: Path, bad: dict, why: str
@@ -505,7 +486,7 @@ async def test_round_trip_times_out_cleanly_when_nobody_answers(tmp_path: Path) 
     )
     task = asyncio.create_task(server.run())
     try:
-        broker.open_request(Q, question="?", options=None, chat_id=42, timeout_s=1)
+        broker.open_request(Q, question="?", options=["a"], chat_id=42, timeout_s=1)
         assert await _until(lambda: bool(cli.sent))
         answer = await broker.wait_for_answer(Q, timeout_s=3)
     finally:

@@ -103,7 +103,7 @@ Declare both `ntfy:` and `bot:` in config — each named channel picks its own t
 | **`edit_message`** | ✅ | ❌ | ✅ | Update one message in place (live progress) instead of sending many |
 | **`send_file`** | ✅ | ✅ | ✅ | Send logs, screenshots (shown inline), generated artifacts |
 | **`send_video`** | ✅ | ✅ | ✅ | Send a video that **plays in-chat** (mp4/mov/mkv/webm/m4v) |
-| **`ask`** | ✅ | ❌ | ❌ | Question with inline buttons (single or `multi_select`, `columns` per row) OR freetext, blocks until reply. Telegram-only; other sessions can ask through the opt-in broker |
+| **`ask`** | ✅ | ❌ | ❌ | Question with inline buttons (single or `multi_select`, `columns` per row; `options` required, typed replies are ignored), blocks until a tap. Telegram-only; other sessions can ask through the opt-in broker |
 | **`set_reminder`** | ✅ | ✅ | ✅ | Schedule a reminder — saved to disk, survives a restart |
 | **`cancel_reminder`** | — | — | — | Cancel a pending reminder |
 | **`list_reminders`** | — | — | — | List currently pending reminders |

@@ -1,11 +1,10 @@
-"""Ask registry: open a question, await operator reply (button or freetext), or time out."""
+"""Ask registry: open a question, await the operator's button tap, or time out."""
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
 import logging
-import math
 import secrets
 import time
 from collections.abc import Callable
@@ -31,8 +30,7 @@ class PendingAsk:
     future: asyncio.Future
     message_id: int
     chat_id: int
-    options: list[str] | None
-    posted_at: float  # epoch seconds; only replies posted AFTER this resolve the ask
+    options: list[str]
     multi_select: bool = False
     columns: int = 1
     selected: set[int] = field(default_factory=set)
@@ -78,7 +76,7 @@ class AskRegistry:
         *,
         chat_id: int,
         question: str,
-        options: list[str] | None,
+        options: list[str],
         timeout_s: int,
         multi_select: bool = False,
         columns: int = 1,
@@ -87,36 +85,32 @@ class AskRegistry:
     ) -> dict[str, Any]:
         """Post, wait, record the outcome in the chat.
 
-        With `multi_select` (requires options) the result `value` is a list —
-        the selected labels in option order, `[text]` for a typed reply, `[]` on
-        timeout — so a caller never has to branch on the type. Otherwise it is
-        a string, as it always was.
+        Answers come only from button taps: typed messages never resolve a
+        question. With `multi_select` the result `value` is a list — the
+        selected labels in option order, `[]` on timeout. Otherwise it is a
+        string.
 
         `deadline` (epoch seconds) replaces "timeout_s after posting" for a
         caller whose clock started earlier: posting can sleep out a flood wait.
         `on_outcome(value, source)` runs as soon as the outcome is known, before
         the chat is edited — those edits can sleep out a flood wait too.
         """
-        multi_select = bool(multi_select and options)
+        multi_select = bool(multi_select)
         q_id = "q_" + secrets.token_hex(4)
-        reply_markup = (
-            _build_keyboard(q_id, options, columns=columns, multi_select=multi_select)
-            if options else None
-        )
+        reply_markup = _build_keyboard(q_id, options, columns=columns,
+                                       multi_select=multi_select)
         fut: asyncio.Future = asyncio.get_running_loop().create_future()
         # Registered before posting. getUpdates and sendMessage are separate
         # requests, so the operator's tap can reach the poll loop before
         # sendMessage's own response does; a tap can only come from this
         # message (its callback_data carries q_id), so accepting it early is
-        # safe. Typed replies stay locked out until the post returns
-        # (`posted_at` is infinite until then).
+        # safe.
         pending = PendingAsk(
             question_id=q_id,
             future=fut,
             message_id=0,
             chat_id=chat_id,
             options=options,
-            posted_at=math.inf,
             multi_select=multi_select,
             columns=columns,
             client=client,
@@ -124,7 +118,7 @@ class AskRegistry:
         self._pending[q_id] = pending
         try:
             msg = await client.send_message(chat_id, question, reply_markup=reply_markup)
-            pending.message_id, pending.posted_at = msg["message_id"], time.time()
+            pending.message_id = msg["message_id"]
             wait_s = timeout_s if deadline is None else max(0.0, deadline - time.time())
             try:
                 value, source = await asyncio.wait_for(fut, timeout=wait_s)
@@ -146,21 +140,21 @@ class AskRegistry:
             self._pending.pop(q_id, None)
         if on_outcome is not None:
             on_outcome(value, source)
-        await _mark_answered(client, chat_id, msg["message_id"], question, value, source)
+        await _mark_answered(client, chat_id, msg["message_id"], question, value)
         return {"value": value, "source": source, "question_id": q_id}
 
     async def handle_update(self, update: dict[str, Any]) -> None:
+        # Typed messages are ignored on purpose: an answer is always a tap on
+        # this question's own buttons, never a guess about which open question
+        # a free-floating message belongs to.
         if cq := update.get("callback_query"):
             await self._handle_callback(cq)
-            return
-        if msg := update.get("message"):
-            self._handle_message(msg)
 
     async def _handle_callback(self, cq: dict[str, Any]) -> None:
         data = cq.get("data", "")
         q_id, _, idx_str = data.partition(":")
         pending = self._pending.get(q_id)
-        if pending and pending.options and not pending.future.done():
+        if pending and not pending.future.done():
             await _apply_tap(pending, idx_str)
         # Always answer the callback so Telegram stops showing a spinner.
         # The client reference travels via the registry's known client (passed at open()).
@@ -173,20 +167,6 @@ class AskRegistry:
             except Exception:
                 log.exception("answer_callback_query failed")
 
-    def _handle_message(self, msg: dict[str, Any]) -> None:
-        chat_id = msg.get("chat", {}).get("id")
-        text = msg.get("text") or ""
-        msg_ts = float(msg.get("date") or 0)
-        # Resolve the oldest pending ask in the same chat posted before this message.
-        candidates = sorted(
-            (p for p in self._pending.values() if p.chat_id == chat_id and msg_ts > p.posted_at),
-            key=lambda p: p.posted_at,
-        )
-        for p in candidates:
-            if not p.future.done():
-                p.future.set_result(([text] if p.multi_select else text, "freetext"))
-                break
-
     # Hook injected by server bootstrap so we can call answer_callback_query
     # without making the registry import the client (avoids cycle in runtime).
     _answer_hook: Any = None
@@ -197,7 +177,7 @@ class AskRegistry:
 
 async def _apply_tap(pending: PendingAsk, idx_str: str) -> None:
     """Resolve on a single-select tap or on Done; toggle and redraw otherwise."""
-    options = pending.options or []
+    options = pending.options
     if pending.multi_select and idx_str == DONE:
         chosen = [opt for idx, opt in enumerate(options) if idx in pending.selected]
         pending.future.set_result((chosen, "button"))
@@ -230,18 +210,16 @@ async def _mark_answered(
     message_id: int,
     question: str,
     value: str | list[str],
-    source: str,
 ) -> None:
     """Record the operator's answer in the chat by rewriting the question message.
 
     Without this the inline keyboard just vanishes on reply, leaving no trace in
     chat history of what was picked. Append the choice, then drop the buttons.
     """
-    label = "Đã chọn" if source == "button" else "Trả lời"
     shown = (", ".join(value) or "—") if isinstance(value, list) else value
     try:
         await client.edit_message_text(
-            chat_id, message_id, f"{question}\n\n✅ {label}: {shown}"
+            chat_id, message_id, f"{question}\n\n✅ Đã chọn: {shown}"
         )
     except Exception:
         log.debug("edit_message_text on answer failed (non-fatal)", exc_info=True)
