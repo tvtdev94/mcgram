@@ -31,7 +31,7 @@ src/mcgram/
 ├── rate_limiter.py         # per-tool token bucket
 ├── runtime.py              # AppState dataclass
 │
-├── ask_registry.py         # PendingAsk + button/multi-select/freetext/timeout resolver
+├── ask_registry.py         # PendingAsk + button/multi-select/timeout resolver
 ├── reminders.py            # asyncio.Task scheduler; saves/reloads/adopts via reminder_spool
 ├── skill_installer.py      # bundled Claude skill installer
 │
@@ -68,7 +68,7 @@ mcgram supports three transports, each with different capabilities and constrain
 ### Telegram (polling, two-way)
 - Requires a bot token (`MCGRAM_BOT_TOKEN`), stored in `~/.mcgram/.env`
 - Long-polls `getUpdates` to receive inbound messages (one client per bot token per machine)
-- Supports `ask` (operator replies directly to the message button or freetext field)
+- Supports `ask` (operator answers by tapping one of the question's buttons; typed messages are ignored)
 - Tools: `send_message`, `send_file`, `ask`, `set_reminder` (all use the inbound channel)
 - Enabled by `bot:` section in config.yaml
 

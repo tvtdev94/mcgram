@@ -10,7 +10,7 @@
 [![PyPI](https://img.shields.io/pypi/v/mcgram.svg)](https://pypi.org/project/mcgram/)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/tvtdev94/mcgram/blob/main/LICENSE)
-[![Tests](https://img.shields.io/badge/tests-611%20passing-brightgreen.svg)](#)
+[![Tests](https://img.shields.io/badge/tests-609%20passing-brightgreen.svg)](#)
 [![Coverage](https://img.shields.io/badge/coverage-85%25-brightgreen.svg)](#)
 
 <img src="https://raw.githubusercontent.com/tvtdev94/mcgram/main/docs/images/hero.png" alt="mcgram hero" width="720" />
@@ -103,7 +103,7 @@ Declare both `ntfy:` and `bot:` in config — each named channel picks its own t
 | **`edit_message`** | ✅ | ❌ | ✅ | Update one message in place (live progress) instead of sending many |
 | **`send_file`** | ✅ | ✅ | ✅ | Send logs, screenshots (shown inline), generated artifacts |
 | **`send_video`** | ✅ | ✅ | ✅ | Send a video that **plays in-chat** (mp4/mov/mkv/webm/m4v) |
-| **`ask`** | ✅ | ❌ | ❌ | Question with inline buttons (single or `multi_select`, `columns` per row) OR freetext, blocks until reply. Telegram-only; other sessions can ask through the opt-in broker |
+| **`ask`** | ✅ | ❌ | ❌ | Question with inline buttons (single or `multi_select`, `columns` per row; `options` required, typed replies are ignored), blocks until a tap. Telegram-only; other sessions can ask through the opt-in broker |
 | **`set_reminder`** | ✅ | ✅ | ✅ | Schedule a reminder — saved to disk, survives a restart |
 | **`cancel_reminder`** | — | — | — | Cancel a pending reminder |
 | **`list_reminders`** | — | — | — | List currently pending reminders |
@@ -317,7 +317,7 @@ src/mcgram/
 └── tools/  send_message · edit_message · send_file · send_video · ask · set_reminder · cancel_reminder · list_reminders
 ```
 
-Small focused modules (most <200 LOC, largest ~400), 611 tests, ruff clean, py3.11/3.12 × ubuntu/windows in CI.
+Small focused modules (most <200 LOC, largest ~400), 609 tests, ruff clean, py3.11/3.12 × ubuntu/windows in CI.
 
 ## Update / uninstall
 

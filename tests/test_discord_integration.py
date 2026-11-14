@@ -95,7 +95,7 @@ async def test_bad_thread_id_is_structured_error_not_crash(
 
 
 async def test_ask_on_discord_channel_unsupported(two_channel_state: AppState) -> None:
-    out = await ask.handle(two_channel_state, question="Deploy?", channel="eve")
+    out = await ask.handle(two_channel_state, question="Deploy?", options=["ok"], channel="eve")
     assert out["error"] == "transport_unsupported"
 
 

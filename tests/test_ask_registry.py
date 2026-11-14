@@ -62,23 +62,6 @@ async def test_tap_delivered_before_the_post_returns_still_answers() -> None:
     assert (result["value"], result["source"]) == ("No", "button")
 
 
-async def test_freetext_sent_while_the_question_is_still_posting_is_not_its_answer() -> None:
-    """Registering early must not widen what a typed reply can answer: the
-    operator cannot have seen the question before it was posted."""
-    client = FakeClient()
-    reg = AskRegistry()
-    post = client.send_message
-
-    async def reply_arrives_during_post(chat_id: int, text: str, **kw: Any) -> dict[str, Any]:
-        await reg.handle_update({"message": {"chat": {"id": 1}, "text": "unrelated",
-                                             "date": int(time.time()) + 60}})
-        return await post(chat_id, text, **kw)
-
-    client.send_message = reply_arrives_during_post  # type: ignore[method-assign]
-    result = await reg.open(client, chat_id=1, question="Q?", options=None, timeout_s=1)
-    assert result["source"] == "timeout"
-
-
 def test_build_keyboard_one_button_per_row() -> None:
     kb = _build_keyboard("q_x", ["A", "B"])
     assert kb["inline_keyboard"] == [
@@ -111,29 +94,21 @@ async def test_button_resolves_ask() -> None:
     assert any(e["kind"] == "markup" and e["reply_markup"] is None for e in client.edited)
 
 
-async def test_freetext_resolves_ask() -> None:
+async def test_typed_message_is_never_an_answer() -> None:
+    """Only a tap on the question's own buttons answers it; a typed message in
+    the same chat must leave the question open until it times out."""
     client = FakeClient()
     reg = AskRegistry()
 
-    async def driver() -> None:
-        for _ in range(50):
-            if reg.open_count:
-                break
-            await asyncio.sleep(0.01)
-        await asyncio.sleep(0.01)  # ensure msg.date > posted_at
-        await reg.handle_update({
-            "message": {
-                "chat": {"id": 1},
-                "text": "because reasons",
-                "date": time.time() + 1,
-            }
-        })
+    async def type_a_reply() -> None:
+        await _tap(reg)  # waits for the question to be open
+        await reg.handle_update({"message": {"chat": {"id": 1}, "text": "yes please",
+                                             "date": time.time() + 1}})
 
-    drv = asyncio.create_task(driver())
-    result = await reg.open(client, chat_id=1, question="Why?", options=None, timeout_s=5)
+    drv = asyncio.create_task(type_a_reply())
+    result = await reg.open(client, chat_id=1, question="Why?", options=["A"], timeout_s=1)
     await drv
-    assert result["value"] == "because reasons"
-    assert result["source"] == "freetext"
+    assert (result["value"], result["source"]) == ("", "timeout")
 
 
 async def test_timeout() -> None:
@@ -191,17 +166,6 @@ async def test_multi_select_value_is_always_a_list() -> None:
                                timeout_s=1, multi_select=True)
     assert timed_out["value"] == []
 
-    async def reply() -> None:
-        await _tap(reg)  # waits for the question to be open
-        await reg.handle_update({"message": {"chat": {"id": 1}, "text": "neither",
-                                             "date": time.time() + 1}})
-
-    drv = asyncio.create_task(reply())
-    typed = await reg.open(FakeClient(), chat_id=1, question="?", options=["A"],
-                           timeout_s=5, multi_select=True)
-    await drv
-    assert (typed["value"], typed["source"]) == (["neither"], "freetext")
-
 
 async def test_concurrent_asks_resolve_independently() -> None:
     client = FakeClient()
@@ -231,27 +195,6 @@ async def test_concurrent_asks_resolve_independently() -> None:
     # At least one must be button-resolved.
     sources = {r1["source"], r2["source"]}
     assert "button" in sources
-
-
-async def test_message_before_question_ignored() -> None:
-    """A message posted BEFORE the ask should not resolve it."""
-    client = FakeClient()
-    reg = AskRegistry()
-
-    # Open ask
-    async def driver() -> None:
-        for _ in range(50):
-            if reg.open_count:
-                break
-            await asyncio.sleep(0.01)
-        # Send a message with date BEFORE posted_at (simulated by 0)
-        await reg.handle_update({"message": {"chat": {"id": 1}, "text": "old", "date": 0}})
-
-    drv = asyncio.create_task(driver())
-    # Use a short timeout so this resolves as timeout, NOT freetext
-    result = await reg.open(client, chat_id=1, question="?", options=None, timeout_s=1)
-    await drv
-    assert result["source"] == "timeout"
 
 
 async def test_callback_for_unknown_question_silently_answered() -> None:
@@ -307,28 +250,6 @@ async def test_button_answer_echoed_into_message() -> None:
     assert result["value"] == "No"
     text_edits = [e for e in client.edited if e["kind"] == "text"]
     assert any("Deploy?" in e["text"] and "Đã chọn: No" in e["text"] for e in text_edits)
-
-
-async def test_freetext_answer_echoed_into_message() -> None:
-    client = FakeClient()
-    reg = AskRegistry()
-
-    async def driver() -> None:
-        for _ in range(50):
-            if reg.open_count:
-                break
-            await asyncio.sleep(0.01)
-        await asyncio.sleep(0.01)
-        await reg.handle_update({
-            "message": {"chat": {"id": 1}, "text": "ship it", "date": time.time() + 1}
-        })
-
-    drv = asyncio.create_task(driver())
-    result = await reg.open(client, chat_id=1, question="Why?", options=None, timeout_s=5)
-    await drv
-    assert result["value"] == "ship it"
-    text_edits = [e for e in client.edited if e["kind"] == "text"]
-    assert any("Trả lời: ship it" in e["text"] for e in text_edits)
 
 
 # Suppress "Unused" import on bare envs

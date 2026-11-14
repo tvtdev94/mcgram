@@ -148,7 +148,7 @@ async def test_send_video_routes_to_ntfy(
 async def test_ask_on_ntfy_returns_transport_unsupported(
     ntfy_app_state, httpx_mock
 ) -> None:
-    out = await ask.handle(ntfy_app_state, question="proceed?")
+    out = await ask.handle(ntfy_app_state, question="proceed?", options=["ok"])
     assert out["error"] == "transport_unsupported"
     assert out["channel"] == "default"
     # No network calls

@@ -30,7 +30,7 @@ async def test_too_many_options(app_state: AppState) -> None:
 async def test_no_registry_reports_polling_not_owned(app_state: AppState) -> None:
     """No registry means another instance owns the poll loop — say so."""
     app_state.poll_owner_pid = 4242
-    out = await ask.handle(app_state, question="?")
+    out = await ask.handle(app_state, question="?", options=["a"])
     assert out["error"] == "polling_not_owned"
     assert out["poll_owner_pid"] == 4242
     # The pid belongs in the hint too: it tells the user WHICH session to ask in.
@@ -60,7 +60,7 @@ async def test_timeout_capped(app_state: AppState, httpx_mock) -> None:
         json={"ok": True, "result": True},
     )
     # Caller asks for 100s but limit forces 1s → should timeout fast
-    out = await ask.handle(app_state, question="?", options=None, timeout_s=100)
+    out = await ask.handle(app_state, question="?", options=["a"], timeout_s=100)
     assert out["source"] == "timeout"
 
 
@@ -109,8 +109,11 @@ async def test_happy_button(app_state: AppState, httpx_mock) -> None:
         ({"columns": 5}, "columns_out_of_range"),
         ({"columns": True}, "columns_out_of_range"),
         ({"multi_select": "yes", "options": ["a"]}, "multi_select_must_be_bool"),
-        ({"multi_select": True}, "multi_select_requires_options"),
-        ({"multi_select": True, "options": []}, "multi_select_requires_options"),
+        # Answers are button taps only, so a question without buttons is refused.
+        ({}, "options_required"),
+        ({"options": []}, "options_required"),
+        ({"multi_select": True}, "options_required"),
+        ({"options": "abc"}, "options_must_be_list_of_str"),
     ],
 )
 async def test_layout_arguments_are_validated_before_posting(

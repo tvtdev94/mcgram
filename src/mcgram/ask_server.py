@@ -180,11 +180,11 @@ class AskServer:
             return f"question is longer than {_TEXT_MAX_CHARS} characters"
         if req["timeout_s"] > limits.ask_timeout_max_s:
             return f"timeout_s exceeds ask_timeout_max_s ({limits.ask_timeout_max_s})"
-        if req.get("multi_select") and not options:
-            return "multi_select requires options"
-        if options is not None and len(options) > limits.ask_options_max:
+        if not options:
+            return "options are required (answers are button taps only)"
+        if len(options) > limits.ask_options_max:
             return f"more options than ask_options_max ({limits.ask_options_max})"
-        if options is not None and not all(0 < len(o) <= _TEXT_MAX_CHARS for o in options):
+        if not all(0 < len(o) <= _TEXT_MAX_CHARS for o in options):
             return f"an option label is empty or longer than {_TEXT_MAX_CHARS} characters"
         return None
 
@@ -273,7 +273,7 @@ class AskServer:
             return
         self._audit.write({
             "tool": TOOL_NAME,
-            "status": "ok" if source in ("button", "freetext") else "error",
+            "status": "ok" if source == "button" else "error",
             "via": "broker",
             "question_id": key,
             "source": source,

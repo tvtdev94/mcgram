@@ -139,7 +139,7 @@ async def test_thread_id_ignored_note_on_telegram(app_state: AppState, httpx_moc
 
 
 async def test_ask_on_discord_returns_unsupported(discord_state: AppState) -> None:
-    out = await ask.handle(discord_state, question="ok?", channel="eve")
+    out = await ask.handle(discord_state, question="ok?", options=["ok"], channel="eve")
     assert out["error"] == "transport_unsupported"
     rec = _audit(discord_state.audit.path)[-1]
     assert rec["reason"] == "transport_unsupported"

@@ -153,8 +153,8 @@ def test_open_request_writes_a_complete_record(tmp_path: Path) -> None:
 
 def test_open_request_twice_with_same_id_fails(tmp_path: Path) -> None:
     broker, _, _ = _make(tmp_path)
-    assert broker.open_request(Q, question="a", options=None, chat_id=1, timeout_s=5) is True
-    assert broker.open_request(Q, question="b", options=None, chat_id=1, timeout_s=5) is False
+    assert broker.open_request(Q, question="a", options=["a"], chat_id=1, timeout_s=5) is True
+    assert broker.open_request(Q, question="b", options=["a"], chat_id=1, timeout_s=5) is False
 
 
 def test_open_request_returns_false_when_spool_unwritable(tmp_path: Path) -> None:
@@ -167,7 +167,7 @@ def test_open_request_returns_false_when_spool_unwritable(tmp_path: Path) -> Non
         ttl_pad_s=30,
         heartbeat_stale_s=90,
     )
-    assert broker.open_request(Q, question="a", options=None, chat_id=1, timeout_s=5) is False
+    assert broker.open_request(Q, question="a", options=["a"], chat_id=1, timeout_s=5) is False
 
 
 # --- wait_for_answer --------------------------------------------------------
@@ -203,7 +203,7 @@ async def test_wait_for_answer_picks_up_a_late_write(tmp_path: Path) -> None:
 async def test_answer_written_during_the_final_interval_is_not_lost(tmp_path: Path) -> None:
     """Without a read after the loop, an answer landing in the last poll window
     is missed and then unlinked by close_request — silently swallowing what the
-    operator typed."""
+    operator answered."""
     broker, spool, _ = _make(tmp_path, poll_interval_s=10)
     # Deadline already passed: the loop body runs zero times, so only the
     # post-loop read can find this.
@@ -282,7 +282,7 @@ def test_close_request_removes_request_and_answer_but_keeps_the_claim(tmp_path: 
     """The claim is what stops an owner serving the request again; it expires
     with the request and the sweep removes it."""
     broker, spool, _ = _make(tmp_path)
-    broker.open_request(Q, question="a", options=None, chat_id=1, timeout_s=5)
+    broker.open_request(Q, question="a", options=["a"], chat_id=1, timeout_s=5)
     spool.write_exclusive(Q, "taken", {"expires_at": time.time() + 60})
     _answer(spool, pid=os.getpid())
     broker.close_request(Q)

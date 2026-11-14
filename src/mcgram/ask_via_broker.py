@@ -25,7 +25,7 @@ TOOL_NAME = "ask"
 # last-second tap is the one reported rather than our own timeout.
 ANSWER_GRACE_S = 2.0
 
-_ANSWER_SOURCES = {"button", "freetext", "timeout"}
+_ANSWER_SOURCES = {"button", "timeout"}
 
 
 async def ask_via_broker(
@@ -33,7 +33,7 @@ async def ask_via_broker(
     dest: Destination,
     *,
     question: str,
-    options: list[str] | None,
+    options: list[str],
     timeout_s: int,
     **extra: Any,
 ) -> dict[str, Any]:

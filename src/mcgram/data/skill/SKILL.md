@@ -163,7 +163,7 @@ mcgram discord mention list                                  # list registered m
 - `send_message` text cap: **4096 chars** on Telegram/ntfy, **2000 chars** on Discord. Over the cap the text is sent as a `message.txt` attachment; only text over the file size cap returns `text_too_long`.
 - Caption max 1024 chars (Telegram limit) — auto-truncated with ellipsis.
 - Max **10 pending reminders**. Max delay **24h**. Reminders are saved to disk and **survive a restart**: one that came due while mcgram was down fires on the next start, marked late (dropped if more than 24h overdue). Rarely a crash can deliver one twice.
-- Max **6 buttons** per `ask`. Use freetext (no `options`) for open-ended answers. `columns` (1–4) puts several buttons on a row; `multi_select=true` lets the user tick several options and press Done.
+- `ask` **requires `options`** (1–6 buttons); typed replies are not accepted. For an open-ended question, offer the likely answers as buttons. `columns` (1–4) puts several buttons on a row; `multi_select=true` lets the user tick several options and press Done.
 - Rate limit: 20 calls per minute per tool.
 
 ## Error recovery
@@ -175,6 +175,7 @@ mcgram discord mention list                                  # list registered m
 - `transport_unavailable` → the channel's transport client isn't initialized (e.g. ntfy channel but no `ntfy` section in config). Tell the user to fix config.
 - `path_outside_cwd` → only files inside CWD are sendable. Ask the user to enable `allow_outside_cwd`, or move the file.
 - `file_too_large` → file exceeds the size cap. Compress, split, or summarize.
+- `invalid_input` with `reason: "options_required"` (from `ask`) → pass at least one option; there is no free-text mode.
 - `ask` returning `source: "timeout"` → user didn't reply. Decide: retry, default, or abort.
 - `text_too_long` → from `send_message`: the text is bigger than the transport's file cap (`max_bytes`) — summarize or split. From `edit_message`: over the message cap (`max`) — shorten the edit.
 - `caption_too_long` (from `edit_message`) → the target is a Telegram file/photo/video whose caption is capped at `max` (1024) — shorten the edit, or send a new message.
@@ -188,13 +189,12 @@ mcgram discord mention list                                  # list registered m
 
 ## How `ask` resolves (Telegram only)
 
-User replies by **tapping a button** (when `options` provided) or by **typing a free-text reply**. First reply wins. Timeout → `{source: "timeout", value: ""}`, and the question is marked `⏱ timed out` in the chat.
+User replies by **tapping a button**. Typed messages are ignored. First tap wins. Timeout → `{source: "timeout", value: ""}`, and the question is marked `⏱ timed out` in the chat.
 
-With `multi_select=true`, `value` is always a **list**: the ticked labels in option order after Done, `[text]` for a typed reply, `[]` on timeout. Use it for "which of these apply?" questions, e.g. `ask(question="Which envs to deploy?", options=["dev","staging","prod"], multi_select=True, columns=3)`.
+With `multi_select=true`, `value` is always a **list**: the ticked labels in option order after Done, `[]` on timeout. Use it for "which of these apply?" questions, e.g. `ask(question="Which envs to deploy?", options=["dev","staging","prod"], multi_select=True, columns=3)`.
 
 Source field tells you HOW they replied:
 - `button` — tapped one of the provided options (value = button label, or the list of ticked labels)
-- `freetext` — typed a custom reply (value = their text)
 - `timeout` — no reply within the deadline
 
 ## Audit
