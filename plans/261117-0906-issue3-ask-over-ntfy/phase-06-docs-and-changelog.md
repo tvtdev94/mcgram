@@ -1,7 +1,7 @@
 ---
 phase: 6
 title: "Docs, examples, skill, CHANGELOG"
-status: pending
+status: done
 priority: P2
 dependencies: [4, 5]
 effort: 1.5h

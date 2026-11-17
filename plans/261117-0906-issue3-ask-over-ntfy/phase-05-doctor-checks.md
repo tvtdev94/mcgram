@@ -1,7 +1,7 @@
 ---
 phase: 5
 title: "doctor checks for ntfy ask"
-status: pending
+status: done
 priority: P2
 dependencies: [2]
 effort: 1.5h

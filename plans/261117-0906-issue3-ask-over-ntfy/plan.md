@@ -165,3 +165,27 @@ questions were answered as follows.
    (no sound).
 5. **Stale SKILL.md row.** The `SKILL.md:25` "ask without options" fix ships in
    a separate PR (#13). This plan does not touch that line.
+
+## Implementation notes (deviations from the phase text)
+
+- **Exception names** carry an `Error` suffix (`NtfyTopicNotProtectedError`,
+  `NtfyReplyUnreachableError`, `NtfyAuthFailedError`, base `NtfyAskError`) to
+  match the repo's exception naming and ruff's N818. `posted` on the base class
+  tells the tool layer whether the question reached the phone.
+- **Probe query** is `?poll=1&since=none` instead of `since=latest`, so a
+  readable topic hands back no cached message. `none` is a documented value of
+  ntfy's `parseSince` (`server/server.go`).
+- **Verified against ntfy source:** the topic charset `^[-_A-Za-z0-9]{1,64}$`
+  (`topicRegex`, `server/server.go`); an anonymous read of a denied topic
+  answers 403 (`authorizeTopic` → `errHTTPForbidden`,
+  `server/server_middleware.go`); the `open` event carries `id` and `time`
+  (`model.NewMessage`). Both 401 and 403 still count as denied.
+- **Cursor fallback.** If an `open` event ever lacks `time`, a reconnect or a
+  catch-up uses `since=all`. That is safe because ids and tokens are random.
+- **Threat model** gained one bullet under "Required setup" for the https
+  requirement (decision 1); the rest is the approved text.
+- **Root `config.example.yaml`** has no `ntfy:` section, so only the bundled
+  `src/mcgram/data/config.example.yaml` (what `mcgram init` writes) got the
+  commented `ask:` block.
+- **iOS wording.** ntfy#1728 says iOS ignores `clear` and leaves the tapped
+  notification in place; it does not say the app opens. The docs say that.

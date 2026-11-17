@@ -1,7 +1,7 @@
 ---
 phase: 4
 title: "Tool and server wiring"
-status: pending
+status: done
 priority: P1
 dependencies: [3]
 effort: 2h
