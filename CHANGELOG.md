@@ -8,6 +8,15 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- **`ask` over ntfy (opt-in).** With `ntfy.ask.enabled: true`, `ask` on an
+  ntfy channel posts up to three action buttons. A tap posts to a reply topic
+  that mcgram subscribes to while the question is open. It requires an access
+  token, an `https://` server, a question topic nobody can read anonymously,
+  and a reply topic anyone can post to but only you can read. mcgram checks the
+  two topics before every ask, and `mcgram doctor` checks the whole setup.
+  There is no `multi_select` on ntfy. It works in every session without the
+  broker. **Off by default**: read the ntfy section of
+  `docs/security-threat-model.md` first.
 - **Operator commands from Telegram (opt-in).** With `inbox.enabled: true`, type `/status`,
   `/stop` or `/note <text>` to the bot (`/stop@<label>` to address one session) and Claude reads it
   through the new `check_inbox` tool — in every session, not only the one polling. mcgram never runs
@@ -23,6 +32,9 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   Telegram, the ntfy default topic and every Discord channel.
 
 ### Fixed
+- A Telegram `ask` cancelled from Claude Code (Esc, or the session closing)
+  now marks the question stopped and removes its buttons. The cleanup used to
+  be cancelled together with the call, leaving live buttons that nobody heard.
 - Reminders no longer fire late by the time the machine spent suspended. On
   Linux and macOS the clock asyncio sleeps on stops during suspend, so a
   reminder held by a live session fired a whole suspend late. The wait now

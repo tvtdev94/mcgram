@@ -1,7 +1,7 @@
 ---
 phase: 4
 title: "Tool and server wiring"
-status: pending
+status: done
 priority: P1
 dependencies: [3]
 effort: 2h
@@ -60,8 +60,8 @@ effort: 2h
    - Question over 4096 UTF-8 bytes → `invalid_input` / `question_too_long`.
      Past that size, ntfy turns the message into an attachment.
    - `not state.ntfy_client.has_token` → `ntfy_ask_requires_token`.
-   - Server not `https://` → `ntfy_ask_requires_https`. This one is pending
-     open question 2.
+   - Server not `https://` → `ntfy_ask_requires_https`. Decision 1: https is
+     required.
    - Rate limit: `state.rate.try_acquire("ask")`, with the same bucket and
      behaviour as Telegram (`tools/ask.py:143-145`).
    - Call `NtfyAsk.open`. Map the results:

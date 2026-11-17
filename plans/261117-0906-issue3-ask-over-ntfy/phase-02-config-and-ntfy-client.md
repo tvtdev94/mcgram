@@ -1,7 +1,7 @@
 ---
 phase: 2
 title: "Config and ntfy client primitives"
-status: pending
+status: done
 priority: P1
 dependencies: [1]
 effort: 3h

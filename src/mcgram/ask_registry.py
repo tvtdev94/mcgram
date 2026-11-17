@@ -11,6 +11,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+import anyio
+
 if TYPE_CHECKING:
     from .tg_client import TelegramClient
 
@@ -35,6 +37,20 @@ class PendingAsk:
     columns: int = 1
     selected: set[int] = field(default_factory=set)
     client: Any = None  # for re-drawing the keyboard as options toggle
+
+
+def answered_text(question: str, value: str | list[str]) -> str:
+    """The question, rewritten to record the choice once it is answered."""
+    shown = (", ".join(value) or "—") if isinstance(value, list) else value
+    return f"{question}\n\n✅ Đã chọn: {shown}"
+
+
+def timed_out_text(question: str) -> str:
+    return f"{question}\n\n⏱ timed out"
+
+
+def stopped_text(question: str) -> str:
+    return f"{question}\n\n⏹ mcgram stopped before an answer"
 
 
 def _build_keyboard(
@@ -216,11 +232,8 @@ async def _mark_answered(
     Without this the inline keyboard just vanishes on reply, leaving no trace in
     chat history of what was picked. Append the choice, then drop the buttons.
     """
-    shown = (", ".join(value) or "—") if isinstance(value, list) else value
     try:
-        await client.edit_message_text(
-            chat_id, message_id, f"{question}\n\n✅ Đã chọn: {shown}"
-        )
+        await client.edit_message_text(chat_id, message_id, answered_text(question, value))
     except Exception:
         log.debug("edit_message_text on answer failed (non-fatal)", exc_info=True)
     await _strip_keyboard(client, chat_id, message_id)
@@ -241,7 +254,7 @@ async def _mark_timed_out(
 ) -> None:
     """Say so in the chat and drop the buttons, so nobody taps a dead question."""
     try:
-        await client.edit_message_text(chat_id, message_id, f"{question}\n\n⏱ timed out")
+        await client.edit_message_text(chat_id, message_id, timed_out_text(question))
     except Exception:
         log.debug("edit_message_text on timeout failed (non-fatal)", exc_info=True)
     await _strip_keyboard(client, chat_id, message_id)
@@ -252,18 +265,18 @@ async def _mark_abandoned(
 ) -> None:
     """Say the question is dead and drop its buttons, on the way out.
 
-    Runs while the process shuts down, so it is bounded and never sleeps out a
-    flood wait: a stuck edit must not hold up the exit.
+    Runs while the call is being cancelled. MCP cancels through an anyio
+    cancel scope, which re-cancels every later await, so the edits run
+    shielded. They are bounded and never sleep out a flood wait: a stuck edit
+    must not hold up the exit.
     """
-    async def retire() -> None:
+    with anyio.CancelScope(
+        shield=True, deadline=anyio.current_time() + _ABANDON_EDIT_TIMEOUT_S,
+    ) as scope:
         with contextlib.suppress(Exception):
             await client.edit_message_text(
-                chat_id, message_id, f"{question}\n\n⏹ mcgram stopped before an answer",
-                retry_flood_wait=False,
+                chat_id, message_id, stopped_text(question), retry_flood_wait=False,
             )
         await _strip_keyboard(client, chat_id, message_id, retry_flood_wait=False)
-
-    try:
-        await asyncio.wait_for(retire(), timeout=_ABANDON_EDIT_TIMEOUT_S)
-    except TimeoutError:
+    if scope.cancelled_caught:
         log.debug("retiring an abandoned question timed out (non-fatal)")

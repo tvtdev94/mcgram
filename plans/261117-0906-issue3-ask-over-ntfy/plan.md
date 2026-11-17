@@ -1,10 +1,10 @@
 ---
 title: "ask over ntfy via action buttons and a reply topic"
 description: "Opt-in two-way ask on ntfy: http action buttons post a per-option token to a reply topic that mcgram subscribes to; requires an access token and read-protected topics."
-status: pending
+status: in-progress
 priority: P2
 effort: 14h
-branch: fix/reminder-wall-clock
+branch: feat/ntfy-ask
 tags: [ntfy, ask, security, transport]
 created: 2026-11-17
 ---
@@ -44,7 +44,7 @@ taps, and `value` is always one of the caller's labels.
 3. A replayed reply cannot resolve a later question.
 4. A reply-topic body is never returned to the caller, logged, or audited.
 5. `ask` refuses before posting in each of these cases, with a distinct error:
-   no token, http server (pending open question 2), either topic anonymously
+   no token, http server, either topic anonymously
    readable, or listener not ready.
 6. A tap made while the listener was disconnected is still delivered if the
    listener reconnects or the catch-up read succeeds before the deadline.
@@ -121,7 +121,7 @@ No two phases that may run in parallel touch the same file.
 
 ```yaml
 ntfy:
-  server: https://ntfy.example.com     # https required for ask (open question 2)
+  server: https://ntfy.example.com     # https required for ask (decision 1)
   default_topic: mcgram-q-<hex>        # question topic: anonymous read DENIED
   access_token_env: NTFY_TOKEN         # REQUIRED when ask.enabled
   ask:
@@ -149,20 +149,61 @@ ntfy:
 | Mocks diverge from real ntfy behaviour (codes, `open` event, wire format of the action body) | M×M | Phase 6 adds a manual smoke test against a self-hosted ntfy and a real phone. `ntfy_client.py:32` already flags this gap. |
 | Laptop sleep or a network outage during an ask | M×M | The listener reconnects with `since=<cursor>`, reads once more at the deadline, and returns `ntfy_reply_unreachable` rather than `timeout`. |
 
-## Open questions for the user
+## Decisions (approved by the user, 2026-11-17)
 
-1. **Reply-topic auth model.** The plan uses an anonymously writable reply
-   topic with per-option tokens and no credential in the action. An optional
-   second mode would put a scoped publisher token in the action, which is only
-   possible on a self-hosted server with a dedicated write-only user. Should
-   that mode exist too? It is not in the plan.
-2. **http servers.** Should `ask` require an `https://` server? Over plain HTTP
-   the option tokens and the Bearer token travel in clear. Proposed: require
-   https, which blocks LAN-only self-hosted setups.
-3. **Strict probe or advisory probe.** Should the anonymous-read probe stay
-   strict, refusing to ask when a topic is readable? The alternative is a
-   warning plus an override flag. Proposed: strict, with no override.
-4. **Outcome marker priority.** The marker that replaces the notification can
-   be priority 2 (no sound) or the default priority. Proposed: 2.
-5. **Stale SKILL.md row.** The bundled `SKILL.md:25` still suggests "`ask`
-   without options", which 0.7.0 removed. Fix it in phase 6, or separately?
+The plan and the phase 1 threat-model text were approved as proposed. The open
+questions were answered as follows.
+
+1. **http servers.** `ask` requires an `https://` server and refuses otherwise
+   with `ntfy_ask_requires_https`. `mcgram doctor` reports an `http://` server
+   as `[FAIL]` when `ntfy.ask` is on.
+2. **Probe strictness.** The anonymous-read probe is strict: `ask` refuses with
+   `ntfy_topic_not_protected`, and there is no override.
+3. **Reply-topic auth model.** No write-only-token-in-button mode. It stays a
+   non-goal.
+4. **Outcome marker priority.** The replacement notification uses priority 2
+   (no sound).
+5. **Stale SKILL.md row.** The `SKILL.md:25` "ask without options" fix ships in
+   a separate PR (#13). This plan does not touch that line.
+
+## Implementation notes (deviations from the phase text)
+
+- **Exception names** carry an `Error` suffix (`NtfyTopicNotProtectedError`,
+  `NtfyReplyUnreachableError`, `NtfyAuthFailedError`, base `NtfyAskError`) to
+  match the repo's exception naming and ruff's N818. `posted` on the base class
+  tells the tool layer whether the question reached the phone.
+- **Probe query** is `?poll=1&since=none` instead of `since=latest`, so a
+  readable topic hands back no cached message. `none` is a documented value of
+  ntfy's `parseSince` (`server/server.go`).
+- **Verified against ntfy source:** the topic charset `^[-_A-Za-z0-9]{1,64}$`
+  (`topicRegex`, `server/server.go`); an anonymous read of a denied topic
+  answers 403 (`authorizeTopic` → `errHTTPForbidden`,
+  `server/server_middleware.go`); the `open` event carries `id` and `time`
+  (`model.NewMessage`). Both 401 and 403 still count as denied.
+- **Cursor fallback.** If an `open` event ever lacks `time`, a reconnect or a
+  catch-up uses `since=all`. That is safe because ids and tokens are random.
+- **Threat model** gained one bullet under "Required setup" for the https
+  requirement (decision 1); the rest is the approved text.
+- **Root `config.example.yaml`** has no `ntfy:` section, so only the bundled
+  `src/mcgram/data/config.example.yaml` (what `mcgram init` writes) got the
+  commented `ask:` block.
+- **iOS wording.** ntfy#1728 says iOS ignores `clear` and leaves the tapped
+  notification in place; it does not say the app opens. The docs say that.
+
+## Review follow-up (PR #15)
+
+- **Cancellation.** MCP cancels a call through an anyio cancel scope, which
+  re-cancels every later await. The cleanup that retires a question (ntfy
+  outcome publish, listener stop, Telegram `_mark_abandoned`) now runs in a
+  shielded `anyio.CancelScope` with a 5 s deadline. `anyio` is now a declared
+  dependency.
+- **Lost publish response.** The question is published with its question id as
+  `sequence_id`. A read timeout, read error or protocol error on that publish
+  reports "may have been posted" and retires the question.
+- **Outcome size.** The outcome message shortens the quoted question to stay
+  within ntfy's 4096-byte message limit.
+- **Time bound.** The deadline catch-up read has its own 5 s budget. The
+  remaining overhead beyond `timeout_s` is documented in `NtfyAsk.open` and in
+  `docs/architecture.md`.
+- **doctor** also reads the reply topic with the token.
+- The extra opt-in hint on the disabled path stays (decided).

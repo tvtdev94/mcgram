@@ -39,6 +39,10 @@ class AppState:
     # does (see ask_broker / ask_server). None means "no broker on this machine".
     ask_broker: Any | None = None
     reminders: Any | None = None
+    # Set once at boot, and only when `ntfy.ask.enabled` and an ntfy client
+    # exists. Unlike ask_registry it does not depend on Telegram poll ownership:
+    # every session subscribes to the ntfy reply topic on its own.
+    ntfy_ask: Any | None = None
     # Set once at boot, and only when `inbox.enabled` (an `InboxSession`). Its
     # `unavailable` reason is set when the inbox cannot work in this session.
     inbox: Any | None = None

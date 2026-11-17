@@ -12,7 +12,14 @@ from dotenv import load_dotenv
 from .broker_wiring import ASK_NAMESPACE, REMINDER_NAMESPACE, safe_spool
 from .config import DEFAULT_CHANNEL, Settings
 from .discord_client import DiscordClient
-from .errors import AuthError, ConfigError, DiscordError, NtfyError, TelegramError
+from .errors import (
+    AuthError,
+    ConfigError,
+    DiscordError,
+    NtfyError,
+    TelegramError,
+    TransportError,
+)
 from .ntfy_client import NtfyClient
 from .tg_client import TelegramClient
 
@@ -116,6 +123,8 @@ async def _check_ntfy(settings: Settings, rows: list[str], send: bool) -> int:
                 rows.append(_fail("ntfy health",
                                   f"non-200 from {settings.ntfy.server}"))
                 failures += 1
+            if settings.ntfy.ask.enabled:
+                failures += await _check_ntfy_ask(settings, nc, rows, send)
             if not send:
                 rows.append(_skip("ntfy send test", _NO_SEND))
                 return failures
@@ -142,6 +151,80 @@ async def _check_ntfy(settings: Settings, rows: list[str], send: bool) -> int:
             "ntfy transport",
             f"cannot reach {settings.ntfy.server}: {e}",
         ))
+        failures += 1
+    return failures
+
+
+async def _check_ntfy_ask(
+    settings: Settings, nc: NtfyClient, rows: list[str], send: bool
+) -> int:
+    """What `ask` over ntfy enforces, checked up front: token, https, the two
+    topics' anonymous access, and that the token can read the reply topic. All
+    of these are reads, so they run without `send`."""
+    assert settings.ntfy is not None
+    ntfy = settings.ntfy
+    reply_topic = ntfy.ask.reply_topic
+    assert reply_topic is not None  # Settings validation guarantees it
+    failures = 0
+    if nc.has_token:
+        rows.append(_ok("ntfy ask token", f"env {ntfy.access_token_env}"))
+    else:
+        rows.append(_fail("ntfy ask token", f"env {ntfy.access_token_env} is not set"))
+        failures += 1
+    if not ntfy.server.startswith("https://"):
+        rows.append(_fail("ntfy ask https",
+                          f"{ntfy.server} is not https:// — ask over ntfy refuses it"))
+        failures += 1
+    # `_check_ntfy` has already required default_topic, the fallback topic.
+    question_topics = sorted({
+        ch.ntfy_topic or ntfy.default_topic or "" for ch in settings.channels.values()
+        if ch.transport == "ntfy"
+    } - {""})
+    checks = [("ntfy ask question topic protected", t,
+               "reserve the topic / deny anonymous read") for t in question_topics]
+    checks.append(("ntfy ask reply topic protected", reply_topic,
+                   "reserve it with everyone write-only, read only by your user"))
+    for label, topic, fix in checks:
+        try:
+            denied = await nc.anonymous_read_denied(topic)
+        except (NtfyError, TransportError) as e:
+            rows.append(_fail(label, f"topic={topic}: {e}"))
+            failures += 1
+            continue
+        if denied:
+            rows.append(_ok(label, f"topic={topic}"))
+        else:
+            rows.append(_fail(label, f"topic={topic} is readable anonymously — {fix}"))
+            failures += 1
+    if nc.has_token:
+        # mcgram listens for taps as the token's user; without read access the
+        # first ask fails with ntfy_auth.
+        label = "ntfy ask token reads reply topic"
+        try:
+            await nc.poll(reply_topic, since="none")
+            rows.append(_ok(label, f"topic={reply_topic}"))
+        except AuthError:
+            rows.append(_fail(label, f"topic={reply_topic}: the token's user may not read "
+                                     "it — give that user read access to the reply topic"))
+            failures += 1
+        except (NtfyError, TransportError) as e:
+            rows.append(_fail(label, f"topic={reply_topic}: {e}"))
+            failures += 1
+    label = "ntfy ask reply topic accepts anonymous publish"
+    if not send:
+        rows.append(_skip(label, _NO_SEND))
+        return failures
+    try:
+        # As a phone tap does: no credential. Running instances ignore it (no `q`).
+        async with NtfyClient(ntfy.server) as anonymous:
+            await anonymous.send_message(reply_topic, '{"probe":"mcgram doctor"}')
+        rows.append(_ok(label, f"topic={reply_topic}"))
+    except AuthError:
+        rows.append(_fail(label, "phone taps will be refused; set everyone write-only "
+                                 "on the reply topic"))
+        failures += 1
+    except (NtfyError, TransportError) as e:
+        rows.append(_fail(label, str(e)))
         failures += 1
     return failures
 

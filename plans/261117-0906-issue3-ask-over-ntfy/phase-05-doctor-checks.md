@@ -1,7 +1,7 @@
 ---
 phase: 5
 title: "doctor checks for ntfy ask"
-status: pending
+status: done
 priority: P2
 dependencies: [2]
 effort: 1.5h
@@ -47,7 +47,7 @@ Add these steps when `settings.ntfy.ask.enabled` is true, inside the existing
    - `[OK]` on 2xx. `[FAIL]` on 401/403, with the message "phone taps will be
      refused; set everyone write-only on the reply topic".
    - Without `--send`: `[SKIP]` with `_NO_SEND`.
-4. Server URL `http://` → `[FAIL]`. This is pending open question 2.
+4. Server URL `http://` → `[FAIL]`. Decision 1: ask requires https.
 
 ## Tests (load `test-audit` first)
 

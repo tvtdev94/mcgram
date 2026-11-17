@@ -32,6 +32,8 @@ src/mcgram/
 ├── runtime.py              # AppState dataclass
 │
 ├── ask_registry.py         # PendingAsk + button/multi-select/timeout resolver
+├── ntfy_ask.py             # ask over ntfy: per-option tokens, answer matching (opt-in)
+├── ntfy_reply_listener.py  # subscription on the ntfy reply topic while a question is open
 ├── reminders.py            # asyncio.Task scheduler; saves/reloads/adopts via reminder_spool
 ├── skill_installer.py      # bundled Claude skill installer
 │
@@ -51,6 +53,7 @@ src/mcgram/
 │   ├── send_video.py
 │   ├── ask.py
 │   ├── _ask_refusal.py     # why `ask` can't run here (fail-fast refusals)
+│   ├── _ask_ntfy.py        # `ask` on ntfy channels: pre-flight checks + error mapping
 │   ├── set_reminder.py
 │   ├── cancel_reminder.py
 │   ├── list_reminders.py
@@ -75,9 +78,11 @@ mcgram supports three transports, each with different capabilities and constrain
 - Tools: `send_message`, `send_file`, `ask`, `set_reminder` (all use the inbound channel)
 - Enabled by `bot:` section in config.yaml
 
-### ntfy.sh (one-way, no registration)
+### ntfy.sh (one-way unless `ntfy.ask` is on, no registration)
 - No credentials needed (ntfy topics are unguessable UUIDs or password-protected)
-- Send-only via HTTP POST to a public service
+- Send-only via HTTP POST to a public service, unless `ntfy.ask.enabled` turns
+  on `ask` (see [Data flow: an `ask` over ntfy](#data-flow-an-ask-over-ntfy));
+  that needs an access token and read-protected topics
 - Fallback for polling-disabled deployments
 - Enabled by `ntfy:` section in config.yaml
 
@@ -148,6 +153,49 @@ sequenceDiagram
 7. Audit log gets `{tool:"ask", status:"ok", source:"button", ms_to_resolve}`
 8. Claude Code receives the structured response
 
+## Data flow: an `ask` over ntfy
+
+Opt-in (`ntfy.ask.enabled`; read the
+[threat model](security-threat-model.md#ntfy-ask-reply-topic) first). No poll
+lock and no broker: every session subscribes on its own, because ntfy fans each
+reply out to every subscriber, and ignores question ids it did not open.
+
+```
+Claude ─ask(q, options≤3)─▶ tools/ask.py ─ntfy─▶ tools/_ask_ntfy.py ─▶ NtfyAsk.open()
+  1. probe: anonymous GET /<question_topic>/json?poll=1&since=none and the same for
+     /<reply_topic> → both must be 401/403, else ntfy_topic_not_protected
+  2. register {q_id, one token per option, future}; ReplyListener.ensure_started();
+     wait for the stream's `open` event (else ntfy_reply_unreachable, nothing posted)
+  3. POST <server>/  {topic, message, actions:[{action:"http", url:<server>/<reply_topic>,
+                     method:"POST", body:'{"q":"q_ab12cd34","t":"<token_i>"}', clear:true}×n],
+                     sequence_id:"q_ab12cd34"}
+Phone tap ─POST (anonymous)─▶ <server>/<reply_topic>   (topic: everyone write-only)
+ReplyListener ◀─GET /<reply_topic>/json[?since=<cursor>] (Bearer token, read timeout 90s)─ ntfy
+  message event → NtfyAsk._on_message → pending[q] → compare_digest(t, tokens[i]) → future
+  4. deadline: one catch-up GET ...?poll=1&since=<cursor> (5 s budget); then the outcome
+  5. outcome marker: POST <server>/ {topic, sequence_id:"q_ab12cd34", priority:2, message}
+```
+
+- **Listener lifecycle.** The listener starts with the first open question and
+  stops when the last one closes, so an idle mcgram holds no connection. The
+  first connect sends no `since`: the question is posted only after `open`.
+- **Reconnect cursor.** The cursor is the id of the last message seen or,
+  before any, the `time` of the first `open` event — both server values, so the
+  local clock never enters a `since=` comparison. A drop (sleep, network)
+  reconnects with `since=<cursor>` on a 1 s → 30 s backoff.
+- **Outcomes.** A matching token resolves the question with the caller's own
+  label; the reply body never leaves `NtfyAsk`. A known id with a wrong token is
+  audited `{tool:"_ntfy_reply", status:"rejected", reason:"bad_token"}`. If the
+  stream was down and the catch-up read failed, the result is
+  `ntfy_reply_unreachable`, not `source: "timeout"`. A 401/403 on the stream
+  fails every open ntfy ask at once with `ntfy_auth`.
+- **Time bound.** Beyond `timeout_s` an ask spends at most: two probes and the
+  post (each within the 30 s request timeout, normally well under a second),
+  10 s waiting for the subscription to open, 5 s on the catch-up read, and 5 s
+  replacing the notification.
+- **Shutdown.** `NtfyAsk.shutdown()` cancels open asks (each replaces its
+  notification with the stopped marker, bounded to 5 s), then stops the listener.
+
 ## Data flow: `send_file`
 
 1. `tools/send_file.py::handle` resolves path, rejects if non-existent / not regular file / size > cap / outside CWD (unless `allow_outside_cwd`)
@@ -173,7 +221,7 @@ HTTP 409 gets its own path: it means another client is polling this bot token, s
 
 ## Poll ownership
 
-Telegram's `getUpdates` accepts one client per bot token. Everything else mcgram does — sends, reminders, all of ntfy, all of Discord — is one-way HTTP and is safe from any number of processes at once.
+Telegram's `getUpdates` accepts one client per bot token. Everything else mcgram does — sends, reminders, all of ntfy, all of Discord — is safe from any number of processes at once: it is one-way HTTP, except the opt-in ntfy ask, where each session subscribes to the reply topic on its own.
 
 So `~/.mcgram/.lock` guards **the poll loop**, not the process. Before v0.3.0 it wrapped the whole server, and a second Claude Code session died at the MCP handshake with `-32000`.
 

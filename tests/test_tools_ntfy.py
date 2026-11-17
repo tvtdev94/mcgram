@@ -2,20 +2,28 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
+from collections.abc import AsyncIterator
 from email.header import decode_header, make_header
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 
+from mcgram import server
 from mcgram.audit import AuditLog
 from mcgram.config import Settings
 from mcgram.ntfy_client import NtfyClient
 from mcgram.rate_limiter import RateLimiter
 from mcgram.runtime import AppState
+from mcgram.tg_client import TelegramClient
 from mcgram.tools import ask, edit_message, send_file, send_message, send_video
 from mcgram.update_dispatcher import UpdateDispatcher
+from tests import fake_ntfy
+from tests.fake_ntfy import FakeNtfy
 
 NTFY_TOPIC = "mcgram-testxyz"
 NTFY_URL = f"https://ntfy.sh/{NTFY_TOPIC}"
@@ -58,13 +66,16 @@ allow_outside_cwd: true
 @pytest.fixture
 async def ntfy_app_state(ntfy_settings: Settings, tmp_path: Path) -> Any:
     async with NtfyClient() as nc:
-        yield AppState(
+        state = AppState(
             settings=ntfy_settings,
             dispatcher=UpdateDispatcher(),
             rate=RateLimiter(ntfy_settings.defaults.rate_limit_per_min),
             audit=AuditLog(ntfy_settings.audit.path),
             ntfy_client=nc,
         )
+        # Wired as at boot: with ntfy.ask off this stays None.
+        state.ntfy_ask = server._build_ntfy_ask(state)  # noqa: SLF001
+        yield state
 
 
 async def test_send_message_routes_to_ntfy(ntfy_app_state, httpx_mock) -> None:
@@ -306,3 +317,159 @@ async def test_send_message_no_client_returns_transport_unavailable(
     out = await send_message.handle(state, text="x")
     assert out["error"] == "transport_unavailable"
     assert httpx_mock.get_requests() == []
+
+
+# --------------------------------------------------------------------------- #
+# ask over ntfy (ntfy.ask.enabled)
+# --------------------------------------------------------------------------- #
+
+ASK_TOKEN_ENV = "MCGRAM_TEST_NTFY_ASK_TOKEN"
+
+
+def _ask_settings(tmp_path: Path, *, server_url: str = fake_ntfy.SERVER,
+                  bot: bool = False) -> Settings:
+    cfg = tmp_path / "config.yaml"
+    bot_block = "bot:\n  token_env: TEST_TOKEN\n  operator_chat_id: 12345\n" if bot else ""
+    cfg.write_text(
+        f"""
+{bot_block}ntfy:
+  server: {server_url}
+  default_topic: {fake_ntfy.QUESTION_TOPIC}
+  access_token_env: {ASK_TOKEN_ENV}
+  ask:
+    enabled: true
+    reply_topic: {fake_ntfy.REPLY_TOPIC}
+channels:
+  phone:
+    transport: ntfy
+audit:
+  path: {(tmp_path / "audit.jsonl").as_posix()}
+""",
+        encoding="utf-8",
+    )
+    return Settings.load(cfg)
+
+
+@contextlib.asynccontextmanager
+async def _ask_state(
+    settings: Settings, *, token: str | None, **extra: Any
+) -> AsyncIterator[AppState]:
+    """An AppState wired the way `server._run` wires it, shut down on exit."""
+    assert settings.ntfy is not None
+    async with NtfyClient(settings.ntfy.server, access_token=token) as nc:
+        state = AppState(
+            settings=settings,
+            dispatcher=UpdateDispatcher(),
+            rate=RateLimiter(settings.defaults.rate_limit_per_min),
+            audit=AuditLog(settings.audit.path),
+            ntfy_client=nc,
+            **extra,
+        )
+        state.ntfy_ask = server._build_ntfy_ask(state)  # noqa: SLF001
+        try:
+            yield state
+        finally:
+            if state.ntfy_ask is not None:
+                await state.ntfy_ask.shutdown()
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "server_url", "token", "error", "reason"),
+    [
+        ({"multi_select": True}, fake_ntfy.SERVER, fake_ntfy.TOKEN,
+         "invalid_input", "multi_select_unsupported"),
+        ({"options": ["a", "b", "c", "d"]}, fake_ntfy.SERVER, fake_ntfy.TOKEN,
+         "invalid_input", "too_many_options"),
+        ({"question": "é" * 2049}, fake_ntfy.SERVER, fake_ntfy.TOKEN,
+         "invalid_input", "question_too_long"),
+        ({}, fake_ntfy.SERVER, None, "ntfy_ask_requires_token", None),
+        ({}, "http://ntfy.example.com", fake_ntfy.TOKEN, "ntfy_ask_requires_https", None),
+    ],
+    ids=["multi-select", "four-options", "question-over-4096-bytes", "no-token", "http"],
+)
+async def test_ntfy_ask_refuses_before_any_network_call(
+    tmp_path: Path, httpx_mock, kwargs: dict, server_url: str, token: str | None,
+    error: str, reason: str | None,
+) -> None:
+    async with _ask_state(_ask_settings(tmp_path, server_url=server_url),
+                          token=token) as state:
+        args: dict[str, Any] = {"question": "Deploy?", "options": ["Yes", "No"], **kwargs}
+        out = await ask.handle(state, **args)
+    assert out["error"] == error
+    if reason is not None:
+        assert out["reason"] == reason
+    assert out["channel"] == "default"
+    assert httpx_mock.get_requests() == []
+    rec = _audit(state.audit.path)[-1]
+    assert (rec["status"], rec["transport"]) == ("rejected", "ntfy")
+
+
+async def test_ntfy_ask_runs_where_telegram_ask_would_be_refused(
+    tmp_path: Path, httpx_mock
+) -> None:
+    # This session has a bot but does not own polling: a Telegram ask returns
+    # polling_not_owned here, an ntfy ask must not.
+    fake = FakeNtfy(httpx_mock)
+    async with TelegramClient("fake-token") as tg, _ask_state(
+        _ask_settings(tmp_path, bot=True), token=fake_ntfy.TOKEN,
+        client=tg, poll_owner_pid=4242,
+    ) as state:
+        call = asyncio.create_task(ask.handle(
+            state, question="Deploy?", options=["Prod", "Staging"],
+            channel="phone", columns=2,
+        ))
+        _, question = await fake.next_question()
+        fake.broadcast(question["actions"][1]["body"])
+        out = await call
+    assert out["value"] == "Staging"
+    assert out["source"] == "button"
+    assert out["question_id"].startswith("q_")
+    assert out["channel"] == "phone"
+    assert out["note"] == "columns ignored on ntfy"
+    rec = _audit(state.audit.path)[-1]
+    assert (rec["tool"], rec["status"], rec["transport"], rec["question_id"]) == (
+        "ask", "ok", "ntfy", out["question_id"])
+    assert fake_ntfy.TOKEN not in Path(state.audit.path).read_text(encoding="utf-8")
+    assert fake_ntfy.TOKEN not in json.dumps(out)
+    assert fake.unexpected == []
+
+
+async def test_ntfy_ask_on_a_readable_topic_reports_it_and_posts_nothing(
+    tmp_path: Path, httpx_mock
+) -> None:
+    fake = FakeNtfy(httpx_mock)
+    fake.probe_status[fake_ntfy.QUESTION_TOPIC] = 200
+    async with _ask_state(_ask_settings(tmp_path), token=fake_ntfy.TOKEN) as state:
+        out = await ask.handle(state, question="Deploy?", options=["Yes", "No"])
+    assert out["error"] == "ntfy_topic_not_protected"
+    assert out["topic"] == fake_ntfy.QUESTION_TOPIC
+    assert "NOT posted" in out["hint"]
+    assert fake.published == []
+
+
+@pytest.mark.parametrize(
+    ("error", "hint", "retired"),
+    [
+        (httpx.ReadTimeout("timed out"), "MAY have been posted", True),
+        (httpx.ConnectError("refused"), "NOT posted", False),
+    ],
+    ids=["response-lost", "never-connected"],
+)
+async def test_failed_question_publish_says_whether_it_may_be_live(
+    tmp_path: Path, httpx_mock, error: Exception, hint: str, retired: bool
+) -> None:
+    # A read timeout or a dropped connection can come after ntfy stored and
+    # delivered the question; only a failed connect proves it never went out.
+    fake = FakeNtfy(httpx_mock)
+    fake.question_publish_error = error
+    async with _ask_state(_ask_settings(tmp_path), token=fake_ntfy.TOKEN) as state:
+        out = await ask.handle(state, question="Deploy?", options=["Yes", "No"])
+    assert out["error"] == "transport_unreachable"
+    assert hint in out["hint"]
+    _, question = fake.published[0]
+    markers = [p for _, p in fake.published[1:]]
+    if retired:
+        assert [m["sequence_id"] for m in markers] == [question["sequence_id"]]
+        assert "stopped" in markers[0]["message"]
+    else:
+        assert markers == []

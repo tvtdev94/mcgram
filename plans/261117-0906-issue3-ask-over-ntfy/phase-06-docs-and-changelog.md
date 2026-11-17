@@ -1,7 +1,7 @@
 ---
 phase: 6
 title: "Docs, examples, skill, CHANGELOG"
-status: pending
+status: done
 priority: P2
 dependencies: [4, 5]
 effort: 1.5h
@@ -59,7 +59,8 @@ These are the spots that currently state "ask is Telegram-only":
    - Add guidance for `ntfy_topic_not_protected`, `ntfy_ask_requires_token`
      and `ntfy_reply_unreachable`: do not retry, tell the user what to fix.
    - `transport_unsupported` keeps its current guidance.
-   - The stale "ask without options" row (`:25`) depends on open question 5.
+   - Decision 5: the stale "ask without options" row (`:25`) is fixed in a
+     separate PR (#13). Do not change that line here.
 6. **`docs/manual-smoke-test.md`.** Add a manual checklist. This is not run in
    CI and needs a self-hosted ntfy (Docker) plus a real phone. It is the only
    check of behaviour the mocks cannot prove:

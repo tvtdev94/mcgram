@@ -1,7 +1,7 @@
 ---
 phase: 3
 title: "ntfy ask core: registry and reply listener"
-status: pending
+status: done
 priority: P1
 dependencies: [2]
 effort: 5h
@@ -113,7 +113,7 @@ keeps `_pending: dict[str, _Pending]`. Each `_Pending` holds the `future`, the
 7. **On `CancelledError`:** mark the question stopped (best effort, bounded to
    5 s, no retry), then re-raise.
 8. **Mark the outcome.** Publish `answered_text` or `timed_out_text` with
-   `sequence_id=<question id>`, priority 2 (open question 4), and no actions.
+   `sequence_id=<question id>`, priority 2 (decision 4), and no actions.
    This is best effort, and failures are only debug-logged. On server 2.16.0 or
    later with Android 1.22.2 or later, clients replace the notification
    ([publish docs, "Updating + deleting notifications"](https://docs.ntfy.sh/publish/);

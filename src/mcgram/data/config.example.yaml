@@ -9,6 +9,12 @@ ntfy:
   server: https://ntfy.sh
   default_topic: {{NTFY_TOPIC}}
   # access_token_env: NTFY_TOKEN     # only for ntfy paid/self-hosted with auth
+  # Opt-in 2-way `ask` over ntfy. Needs access_token_env, an https server, a
+  # question topic nobody can read anonymously, and a reply topic anyone can
+  # post to but only you can read. Read docs/security-threat-model.md first.
+  # ask:
+  #   enabled: false
+  #   reply_topic: mcgram-r-<random>  # must differ from every question topic
 
 # === Transport B: Telegram (enables 2-way `ask`) ==========================
 # Uncomment + fill in to enable. Token NEVER goes here — it lives in

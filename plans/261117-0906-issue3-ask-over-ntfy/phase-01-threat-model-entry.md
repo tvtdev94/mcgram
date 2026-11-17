@@ -1,7 +1,7 @@
 ---
 phase: 1
 title: "Threat-model entry for ask over ntfy"
-status: pending
+status: done
 priority: P1
 dependencies: []
 effort: 1h
@@ -75,7 +75,7 @@ topic accepts anonymous posts, and answers are authenticated by tokens instead.
 | **T** | Someone who saw one reply (proxy log, reply-topic leak) changes the chosen option | Tokens are per option. A reply reveals only the chosen option's token. |
 | **I** | Account token leaks through the notification | It never enters it (see above). The token stays in `~/.mcgram/.env` and goes out only as the `Authorization` header on mcgram's own requests. Neither the token nor the answer tokens are written to audit, logs or tool results. |
 | **I** | Question text stays on the ntfy server (12h cache by default) and on devices | Same as `send_message` over ntfy. Don't ask about secrets. |
-| **I** | Tokens sniffed on a plain-HTTP server | `ask` requires an `https://` server *(pending decision)*. |
+| **I** | Tokens sniffed on a plain-HTTP server | `ask` requires an `https://` server and refuses otherwise (`ntfy_ask_requires_https`). |
 | **D** | Flood the reply topic, which anyone can post to | Bodies over 1 KiB are dropped before parsing, and malformed or unknown-id bodies are ignored without an audit entry. ntfy rate-limits the publisher by IP. A flood can delay or hide an answer (replay is capped at 10 MB per topic). It cannot forge one. |
 | **D** | Subscription drops (sleep, network) and an answer is missed or reported as "ignored" | The listener reconnects with `since=<last id>` and reads once more at the deadline. If the reply topic was unreachable, `ask` returns `ntfy_reply_unreachable`, never `source:"timeout"`. A 401/403 on the subscription fails every open ntfy ask at once with `ntfy_auth`. |
 | **E** | Prompt injection through the answer | The reply body never reaches Claude. `value` is always one of the labels the caller passed, chosen by token match. A prompt-injected Claude can still ask a leading question, the same as on Telegram. |

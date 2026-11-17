@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import json
 from email.header import decode_header, make_header
 from pathlib import Path
 
 import httpx
 import pytest
+from pytest_httpx import IteratorStream
 
-from mcgram.errors import AuthError, NtfyError
+from mcgram.errors import AuthError, NtfyError, TransportError
 from mcgram.ntfy_client import NtfyClient
 
 TOPIC = "mcgram-testtopic1234"
@@ -220,5 +222,86 @@ async def test_multiline_caption_sent_as_single_header_line(
     assert httpx_mock.get_requests()[0].headers.get("Message") == "line one line two three"
 
 
-# Suppress unused-import warning for `httpx`
-_ = httpx
+
+# --------------------------------------------------------------------------- #
+# Two-way primitives used by ask over ntfy
+# --------------------------------------------------------------------------- #
+
+ROOT_URL = "https://ntfy.sh/"
+JSON_URL = f"https://ntfy.sh/{TOPIC}/json"
+
+
+async def test_publish_posts_json_to_server_root(httpx_mock) -> None:
+    # ntfy accepts a JSON publish only at the server root, and the actions /
+    # sequence_id fields exist only in the JSON form.
+    httpx_mock.add_response(url=ROOT_URL, method="POST", json=_ntfy_ok())
+    actions = [{"action": "http", "label": "Yes", "url": "https://ntfy.sh/r"}]
+    async with NtfyClient(access_token="tk_secret") as c:
+        r = await c.publish(TOPIC, "proceed?", priority=2, actions=actions,
+                            sequence_id="abc123")
+    assert r["id"] == "n123"
+    req = httpx_mock.get_requests()[0]
+    assert req.headers["Authorization"] == "Bearer tk_secret"
+    assert json.loads(req.content) == {
+        "topic": TOPIC, "message": "proceed?", "priority": 2,
+        "actions": actions, "sequence_id": "abc123",
+    }
+
+
+async def test_stream_yields_events_and_skips_noise(httpx_mock) -> None:
+    lines = [
+        b'{"id":"o1","time":1700000000,"event":"open","topic":"t"}\n',
+        b"\n",
+        b"not json\n",
+        b'{"id":"m1","time":1700000001,"event":"message","message":"hi"}\n',
+        b'{"id":"k1","time":1700000002,"event":"keepalive"}\n',
+    ]
+    httpx_mock.add_response(url=f"{JSON_URL}?since=o9", stream=IteratorStream(lines))
+    async with NtfyClient(access_token="tk_secret") as c:
+        events = [ev async for ev in c.stream(TOPIC, since="o9")]
+    assert [ev["event"] for ev in events] == ["open", "message", "keepalive"]
+    assert httpx_mock.get_requests()[0].headers["Authorization"] == "Bearer tk_secret"
+
+
+async def test_stream_auth_failure_raises_auth_error(httpx_mock) -> None:
+    httpx_mock.add_response(url=JSON_URL, status_code=403, text="forbidden")
+    async with NtfyClient(access_token="tk_secret") as c:
+        with pytest.raises(AuthError):
+            async for _ in c.stream(TOPIC, since=None):
+                pass
+
+
+async def test_stream_network_error_is_a_scrubbed_transport_error(httpx_mock) -> None:
+    httpx_mock.add_exception(httpx.ConnectError("refused, token tk_secret"), url=JSON_URL)
+    async with NtfyClient(access_token="tk_secret") as c:
+        with pytest.raises(TransportError) as exc:
+            async for _ in c.stream(TOPIC, since=None):
+                pass
+    assert "tk_secret" not in str(exc.value)
+
+
+async def test_poll_returns_cached_events_since_cursor(httpx_mock) -> None:
+    body = (b'{"id":"m1","time":1,"event":"message","message":"a"}\n'
+            b'{"id":"m2","time":2,"event":"message","message":"b"}\n')
+    httpx_mock.add_response(url=f"{JSON_URL}?poll=1&since=m0", content=body)
+    async with NtfyClient(access_token="tk_secret") as c:
+        events = await c.poll(TOPIC, since="m0")
+    assert [ev["id"] for ev in events] == ["m1", "m2"]
+
+
+@pytest.mark.parametrize(("status", "denied"), [(401, True), (403, True), (200, False)])
+async def test_anonymous_read_denied_never_sends_the_token(
+    httpx_mock, status: int, denied: bool
+) -> None:
+    # A probe that sent the token would make every topic look protected.
+    httpx_mock.add_response(url=f"{JSON_URL}?poll=1&since=none", status_code=status)
+    async with NtfyClient(access_token="tk_secret") as c:
+        assert await c.anonymous_read_denied(TOPIC) is denied
+    assert "Authorization" not in httpx_mock.get_requests()[0].headers
+
+
+async def test_anonymous_read_probe_raises_on_unexpected_status(httpx_mock) -> None:
+    httpx_mock.add_response(url=f"{JSON_URL}?poll=1&since=none", status_code=500)
+    async with NtfyClient(access_token="tk_secret") as c:
+        with pytest.raises(NtfyError):
+            await c.anonymous_read_denied(TOPIC)
