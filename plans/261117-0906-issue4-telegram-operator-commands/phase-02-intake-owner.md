@@ -1,7 +1,7 @@
 ---
 phase: 2
 title: "Intake on the poll owner"
-status: pending
+status: completed
 priority: P1
 dependencies: [1]
 effort: 4h

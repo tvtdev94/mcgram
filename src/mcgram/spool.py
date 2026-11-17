@@ -22,6 +22,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from .lock import _pid_alive
 from .spool_safety import make_private_dirs, probe_dir
 
 log = logging.getLogger("mcgram.spool")
@@ -267,6 +268,35 @@ class Spool:
     def probe(self) -> tuple[bool, str]:
         """(ok, reason) — is this spool safe to use? See `spool_safety`."""
         return probe_dir(self._root, self._dir)
+
+
+def heartbeat_status(
+    hb: dict[str, Any], *, protocol: int, stale_s: float, what: str
+) -> tuple[bool, str]:
+    """(alive, reason) for an owner heartbeat `{pid, at, protocol}` read from a spool.
+
+    Alive means the same protocol, a beat younger than `stale_s`, and a pid that
+    still runs. `what` names the feature in each reason ("broker", "inbox").
+    Callers word the missing-heartbeat case themselves.
+    """
+    if hb.get("protocol") != protocol:
+        return False, (
+            f"the polling instance speaks {what} protocol {hb.get('protocol')!r}, "
+            f"this one needs {protocol} — upgrade both sessions"
+        )
+    at = hb.get("at")
+    if not isinstance(at, int | float) or isinstance(at, bool):
+        return False, f"{what} heartbeat is malformed"
+    age = time.time() - at
+    if age > stale_s:
+        return False, (
+            f"{what} heartbeat is {age:.0f}s stale "
+            f"(owner pid={hb.get('pid')} may have died or lost connectivity)"
+        )
+    pid = hb.get("pid")
+    if not isinstance(pid, int) or not _pid_alive(pid):
+        return False, f"{what} owner pid={pid} is no longer running"
+    return True, ""
 
 
 def _mtime(entry: os.DirEntry[str]) -> float:

@@ -43,6 +43,9 @@ class AppState:
     # exists. Unlike ask_registry it does not depend on Telegram poll ownership:
     # every session subscribes to the ntfy reply topic on its own.
     ntfy_ask: Any | None = None
+    # Set once at boot, and only when `inbox.enabled` (an `InboxSession`). Its
+    # `unavailable` reason is set when the inbox cannot work in this session.
+    inbox: Any | None = None
     # Telegram poll-loop ownership. Multiple mcgram processes may run at once
     # (one per Claude Code session), but `getUpdates` allows a single client per
     # bot token, so exactly one of them polls. The others run send-only: every

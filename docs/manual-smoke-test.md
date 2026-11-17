@@ -63,6 +63,7 @@ mcgram doctor
 - [ ] "Remind me in 10 seconds to check logs" → 10s later, `⏰ check logs` arrives
 - [ ] "List my reminders" → shows the one above
 - [ ] "Cancel reminder r_xxxx" → confirms cancellation
+- [ ] Operator inbox: set `inbox.enabled: true`, open two Claude Code sessions in two project folders, and send `/status@<folder>` to the bot → only the session in `<folder>` reports its status, its `check_inbox` result shows `label` equal to the folder name (this confirms the cwd Claude Code gives the server), and 👀 appears on your message
 
 ## Discord-specific (if webhook set up)
 
