@@ -22,7 +22,7 @@ Use this skill when the user says: "báo telegram khi xong", "tell me on Telegra
 | "Gửi video" / "send the demo recording" | `send_video` | `send_video(path="./demo.mp4", caption="Feature demo")` — inline-plays |
 | "Confirm trước khi deploy" / "ask me before X" | `ask` with 2 options | `ask(question="Deploy to prod?", options=["Approve","Cancel"], timeout_s=300)` |
 | "Chọn giúp tôi" / "pick one" | `ask` with options | `ask(question="Which DB to migrate?", options=["staging","prod"])` |
-| "Hỏi tôi tự do" / "open-ended question" | `ask` without options | `ask(question="Any special instructions?")` |
+| "Hỏi tôi tự do" / "open-ended question" | `ask` with the likely answers as options | `ask(question="Any special instructions?", options=["None","Use staging","Wait for me"])` — typed replies are not accepted |
 | "Nhắc sau 30 phút" / "remind me in 30 min" | `set_reminder` | `set_reminder(text="Check container logs", delay_s=1800)` |
 | "Hủy lời nhắc" / "cancel reminder" | `cancel_reminder` | `cancel_reminder(reminder_id="r_abc")` |
 | "Xem các nhắc hiện tại" / "list reminders" | `list_reminders` | `list_reminders()` |
