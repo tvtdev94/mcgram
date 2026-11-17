@@ -14,6 +14,11 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   Telegram, the ntfy default topic and every Discord channel.
 
 ### Fixed
+- Reminders no longer fire late by the time the machine spent suspended. On
+  Linux and macOS the clock asyncio sleeps on stops during suspend, so a
+  reminder held by a live session fired a whole suspend late. The wait now
+  re-reads the wall clock every 30 seconds, and a reminder fired more than a
+  minute after its due time says when it was due.
 - `channel add-discord` no longer overwrites another channel's webhook. Names
   such as `team-a` and `team_a`, or `eve` and `Eve`, derive the same
   `MCGRAM_DISCORD_WEBHOOK_*` env var; the second add now fails with nothing

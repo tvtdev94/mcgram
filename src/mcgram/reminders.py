@@ -20,6 +20,13 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("mcgram.reminders")
 
+# asyncio sleeps on the monotonic clock, which stops while the machine is
+# suspended on Linux and macOS. Waiting in slices of this length and re-reading
+# the wall clock bounds how late a reminder fires after the machine wakes.
+_WALL_CLOCK_CHECK_S = 30.0
+# Fired this long after its due time, a reminder says when it was due.
+_LATE_AFTER_S = 60.0
+
 
 def _iso(epoch: float) -> str:
     return datetime.fromtimestamp(epoch, tz=UTC).isoformat(timespec="seconds")
@@ -88,13 +95,19 @@ class ReminderScheduler:
         if adopted:
             self._adopted.add(rid)
         self._tasks[rid] = asyncio.create_task(
-            self._fire(rid, fires_at, body, dest),
+            self._fire(rid, fires_at, body, dest, late=late),
             name=f"mcgram-reminder-{rid}",
         )
 
-    async def _fire(self, rid: str, fires_at: float, body: str, dest: Destination) -> None:
+    async def _fire(
+        self, rid: str, fires_at: float, body: str, dest: Destination, *, late: bool,
+    ) -> None:
         try:
-            await asyncio.sleep(max(0.0, fires_at - time.time()))
+            while (left := fires_at - time.time()) > 0:
+                await asyncio.sleep(min(left, _WALL_CLOCK_CHECK_S))
+            if not late and time.time() - fires_at > _LATE_AFTER_S:
+                body += (f"\n\n(late: was due {_iso(fires_at)}; this computer was "
+                         "probably asleep)")
             if self.store is not None and not self.store.still_mine(rid):
                 # Cancelled from another session since the last watcher tick,
                 # or adopted away while this process looked dead.

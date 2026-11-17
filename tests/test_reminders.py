@@ -6,6 +6,7 @@ import asyncio
 import json
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -90,6 +91,34 @@ async def test_create_fires_after_delay(tmp_path: Path) -> None:
         await asyncio.sleep(0.1)
     assert client.sent == ["⏰ test"]
     assert any(r["status"] == "ok" for r in _audit(s.audit.path) if r["tool"] == "_reminder_fire")
+
+
+@pytest.mark.parametrize(("asleep_s", "late"), [(90, False), (210, True)])
+async def test_fires_on_wall_clock_after_the_machine_sleeps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, asleep_s: int, late: bool,
+) -> None:
+    """A suspended machine stops the monotonic clock asyncio sleeps on, while
+    the wall clock keeps going. The reminder must fire soon after wake, not a
+    whole suspend later, and say so when it is well past due."""
+    from mcgram import reminders
+
+    offset = [0.0]  # wall-clock time that passed while the machine slept
+    monkeypatch.setattr(reminders, "time", SimpleNamespace(
+        time=lambda: time.time() + offset[0], monotonic=time.monotonic,
+    ))
+    monkeypatch.setattr(reminders, "_WALL_CLOCK_CHECK_S", 0.01)
+    s = _settings(tmp_path)
+    client = FakeClient()
+    sched = _scheduler(s, client)
+    sched.create("wake", delay_s=90)
+    await asyncio.sleep(0.05)
+    assert client.sent == []
+    offset[0] = asleep_s
+    assert await _until(lambda: client.sent, timeout=1.0)
+    if late:
+        assert client.sent[0].startswith("⏰ wake\n\n(late: was due ")
+    else:
+        assert client.sent == ["⏰ wake"]
 
 
 async def test_cancel_before_fire(tmp_path: Path) -> None:
