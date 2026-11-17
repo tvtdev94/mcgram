@@ -281,9 +281,10 @@ def test_list_shows_discord_without_url(
 # --------------------------------------------------------------------------- #
 
 
+@pytest.mark.parametrize("send", [False, True])
 def test_doctor_checks_discord_no_url_leak(
     tmp_path: Path, httpx_mock, monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
+    capsys: pytest.CaptureFixture[str], send: bool,
 ) -> None:
     monkeypatch.setenv("MCGRAM_DISCORD_WEBHOOK_EVE", WEBHOOK)
     cfg = _cfg(
@@ -293,10 +294,13 @@ def test_doctor_checks_discord_no_url_leak(
     )
     monkeypatch.setenv("MCGRAM_CONFIG", str(cfg))
     httpx_mock.add_response(url=WEBHOOK, method="GET", json={"channel_id": "5", "name": "h"})
-    httpx_mock.add_response(method="POST", json={"id": "777"})
-    rc = cli_doctor.doctor()
+    if send:
+        httpx_mock.add_response(method="POST", json={"id": "777"})
+    rc = cli_doctor.doctor(send=send)
     out = capsys.readouterr().out
     assert "discord eve" in out
+    # Without --send no POST is mocked, so an attempted send would fail the run.
+    assert ("[OK]   discord eve send test" if send else "[SKIP] discord eve send test") in out
     assert WEBHOOK not in out
     assert "tok_secret_abc" not in out
     assert rc == 0

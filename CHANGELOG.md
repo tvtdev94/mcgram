@@ -7,6 +7,12 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- `mcgram doctor` no longer sends anything by default. It still checks the
+  token, `getMe`, ntfy health and every Discord webhook, and reports each send
+  test as `[SKIP]`. Pass `--send` for the old behavior: one test message to
+  Telegram, the ntfy default topic and every Discord channel.
+
 ### Fixed
 - `channel add-discord` no longer overwrites another channel's webhook. Names
   such as `team-a` and `team_a`, or `eve` and `Eve`, derive the same

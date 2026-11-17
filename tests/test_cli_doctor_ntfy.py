@@ -40,7 +40,7 @@ audit:
     )
 
 
-def test_ntfy_only_happy_path(
+def test_ntfy_only_happy_path_sends_nothing_by_default(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str], httpx_mock,
 ) -> None:
@@ -48,13 +48,12 @@ def test_ntfy_only_happy_path(
     _write_ntfy_only(cfg, tmp_path / "audit.jsonl")
     monkeypatch.setenv("MCGRAM_CONFIG", str(cfg))
     httpx_mock.add_response(url=HEALTH_URL, method="GET", json={"healthy": True})
-    httpx_mock.add_response(url=NTFY_URL, method="POST", json={"id": "n1"})
     rc = doctor()
     out = capsys.readouterr().out
     assert rc == 0
     assert "PASS" in out
     assert "ntfy health" in out
-    assert "ntfy send test" in out
+    assert "[SKIP] ntfy send test" in out
     assert "[SKIP] telegram" in out
 
 
@@ -68,7 +67,7 @@ def test_ntfy_send_fails(
     httpx_mock.add_response(url=HEALTH_URL, method="GET", json={"healthy": True})
     httpx_mock.add_response(url=NTFY_URL, method="POST",
                             status_code=500, text="server down")
-    rc = doctor()
+    rc = doctor(send=True)
     out = capsys.readouterr().out
     assert rc == 1
     assert "FAIL" in out
@@ -83,8 +82,6 @@ def test_ntfy_health_fails_marks_failure(
     _write_ntfy_only(cfg, tmp_path / "audit.jsonl")
     monkeypatch.setenv("MCGRAM_CONFIG", str(cfg))
     httpx_mock.add_response(url=HEALTH_URL, method="GET", status_code=503)
-    # send still mocked so doctor doesn't crash on missing response
-    httpx_mock.add_response(url=NTFY_URL, method="POST", json={"id": "n1"})
     rc = doctor()
     out = capsys.readouterr().out
     assert rc == 1
@@ -110,9 +107,9 @@ def test_hybrid_both_checked(
     )
     httpx_mock.add_response(url=HEALTH_URL, method="GET", json={"healthy": True})
     httpx_mock.add_response(url=NTFY_URL, method="POST", json={"id": "n1"})
-    rc = doctor()
+    rc = doctor(send=True)
     out = capsys.readouterr().out
     assert rc == 0
-    assert "telegram send test" in out
-    assert "ntfy send test" in out
+    assert "[OK]   telegram send test" in out
+    assert "[OK]   ntfy send test" in out
     assert "PASS" in out

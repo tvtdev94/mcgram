@@ -18,7 +18,8 @@ echo "MCGRAM_BOT_TOKEN=<your-token>" > ~/.mcgram/.env
 - [ ] `mcgram --help` → lists init / doctor / audit / install-skill
 - [ ] `mcgram init` re-run → reports `skipped (already exists)`
 - [ ] `mcgram init --force` → re-writes `config.yaml`
-- [ ] `mcgram doctor` → all checks `[OK]`, you receive `🩺 mcgram doctor: connection OK` in Telegram, `RESULT: PASS`, exit code 0
+- [ ] `mcgram doctor` → all checks `[OK]`, send tests `[SKIP]`, nothing arrives in Telegram, `RESULT: PASS`, exit code 0
+- [ ] `mcgram doctor --send` → you receive `mcgram doctor: telegram OK` in Telegram, `RESULT: PASS`, exit code 0
 - [ ] `mcgram doctor` with bad token (edit `.env`) → fails with clear error, exit 1
 - [ ] Companion skill installed at `~/.claude/skills/mcgram/SKILL.md`
 

@@ -48,7 +48,7 @@ Next steps — choose ONE (or both):
     1. Install the ntfy app: https://ntfy.sh/  (iOS / Android / Web)
     2. In the app, subscribe to topic:  {topic}
        (server: {server})
-    3. Verify:  mcgram doctor
+    3. Verify:  mcgram doctor --send
     4. Restart Claude Code -> /mcp -> mcgram appears -> done
 
   [B] Telegram (required for 2-way `ask` tool):
@@ -57,7 +57,7 @@ Next steps — choose ONE (or both):
        https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates  -> copy `chat.id`
     3. Edit {env}        -> set MCGRAM_BOT_TOKEN
     4. Edit {cfg}        -> uncomment `bot:` block, set operator_chat_id
-    5. Verify:  mcgram doctor
+    5. Verify:  mcgram doctor --send
 """
 
 

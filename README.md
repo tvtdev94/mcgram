@@ -59,7 +59,7 @@ mcgram init                                                # writes ~/.mcgram/co
 #    In the app, subscribe to the topic printed by `mcgram init` (e.g. mcgram-a1b2c3d4...)
 
 # 3) Verify
-mcgram doctor    # ✅ ntfy health, ✅ test message delivered
+mcgram doctor --send    # ✅ ntfy health, ✅ test message delivered
 
 # 4) Restart Claude Code → /mcp → mcgram appears → done
 ```
@@ -86,7 +86,7 @@ mcgram init
 #    Edit ~/.mcgram/config.yaml → uncomment `bot:` block, set operator_chat_id
 
 # 4) Verify
-mcgram doctor    # ✅ get_me OK, ✅ test message delivered
+mcgram doctor --send    # ✅ get_me OK, ✅ test message delivered
 
 # 5) Restart Claude Code → /mcp → mcgram appears → done
 ```
@@ -149,7 +149,8 @@ Then in Claude Code: *"send the failing log to the alerts channel"* → `send_fi
 ```bash
 mcgram                          # MCP stdio server (Claude Code calls this)
 mcgram init [--force]           # scaffold ~/.mcgram/ + skill + auto-register MCP (generates ntfy topic)
-mcgram doctor                   # config + connectivity check (per-transport)
+mcgram doctor [--send]          # config + connectivity check (per-transport); sends nothing
+                                #   unless --send, which delivers one test message per channel
 mcgram test-send NAME [--text T] # send one test message through the normal send path
 mcgram test-send --all          # ...to every configured channel; exit 1 if any send fails
 mcgram audit [opts]             # analyze audit.jsonl: --since 1h, --tool ask, --rejected, --tail
