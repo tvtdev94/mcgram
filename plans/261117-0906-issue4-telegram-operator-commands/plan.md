@@ -189,6 +189,19 @@ equivalent:
   working folder falls back to the `session` label. Kept as planned: the intake rate token is
   taken before the duplicate/stale checks, and the heartbeat follows lock ownership rather than
   `getUpdates` health (documented in `docs/architecture.md`).
+- After the PR review (controller decisions):
+  - Decision 7 is enforced at intake: only `/status`, `/stop`, `/note` are stored; anything else is
+    `dropped/unknown_command`. `/stop @api` (target after a space) is `dropped/ambiguous_target`.
+  - Muting resistance: only signed, unexpired records count toward the 50-record cap; a file
+    already under an update's name is verified and replaced unless genuine
+    (`queued` + `replaced: bad_signature`); redeliveries are audited `ignored/duplicate`; records
+    claiming an expiry beyond `86400 + 60` s are swept.
+  - Every `dropped` intake outcome gets a best-effort 👎 reaction from a background task (own
+    bucket). ⚠️ was the first choice, but it is not on Telegram's ReactionTypeEmoji list. This does
+    not change decision 5: nothing is posted when a command expires unread.
+  - Lone surrogates are stripped from args; with the inbox off, an existing `inbox/` directory is
+    swept once at startup.
+  - Docs: NTP-synced clock requirement, label clashes, `/stop@BotName` and hyphenated labels.
 - Tests add a few cases beyond the plan's tables: the disabled inbox leaves no trace, a non-owner
   never removes another pid's heartbeat, label normalization, the `wait_s` cap, the 20-command batch
   with `more`, and two more forgery cases (another bot's key, a renamed record).

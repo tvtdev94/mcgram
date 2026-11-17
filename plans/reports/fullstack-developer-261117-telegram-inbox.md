@@ -43,7 +43,7 @@ and the user's eight decisions are recorded in `plan.md`.
   CHANGELOG `[Unreleased] ### Added`, and the manual smoke test.
 - `ask` is untouched. No version bump.
 
-## Verification (run in the worktree, HEAD `3730a1d`)
+## Verification, first round (HEAD `3730a1d`)
 
 | Gate | Result |
 |---|---|
@@ -81,6 +81,55 @@ Not changed, as the approved plan specifies:
 
 Not fixed: a narrow race in which a demoted session could remove a new owner's heartbeat while
 still running. It costs at most about 10 s of `receiving: false`.
+
+## Second round: PR #14 review fixes
+
+The independent review is in `plans/reports/code-reviewer-261117-1609-telegram-inbox.md` in the
+main checkout. I reproduced every finding against the code before fixing it, and a scratch script
+confirmed M1, M2, L2, L3 and L4. M3 was confirmed by mutation: with the read-side expiry check
+deleted, all 52 inbox tests still passed. L5 was confirmed by reading `start_inbox`.
+
+The fixes follow the controller's decisions.
+
+| Finding | Fix | Test that fails when the fix is removed |
+|---|---|---|
+| M1 `/stop @api` broadcasts | `dropped/ambiguous_target` + 👎 | `test_intake_filter[spaced-target]` |
+| L2 any `/command` stored | allowlist, `dropped/unknown_command` + 👎; skill updated | `test_intake_filter[unknown-command]` |
+| M2 planted file takes a command's slot | the existing file is verified; anything not genuine is replaced (`replaced: bad_signature`) | `test_a_forged_file_cannot_occupy_a_command_slot`, `test_a_forged_file_replaced_by_the_real_command_is_read` |
+| M2 junk and expired records fill the cap | only signed, unexpired records count toward it | `test_only_live_signed_records_count_toward_the_cap` |
+| M2 records that claim to live for years | swept past `now + 86400 + 60` | `test_expired_records_are_swept_by_every_instance[beyond-max-ttl]` |
+| M2 silent drops | 👎 on every `dropped` outcome, sent from a background task with its own bucket; duplicates audited `ignored/duplicate` | filter table, stale, cap, rate and redelivery tests |
+| M3 expiry check untested | the test now runs a session older than `ttl_s` with a command sent after it started | `test_expired_records_are_hidden_before_the_sweep` |
+| L4 lone surrogate crashes intake | `Cs` stripped in `sanitize` | `test_intake_filter[accepted]` |
+| L5 records left when the inbox is off | one sweep at startup of an existing `inbox/` dir; it creates nothing | `test_disabling_the_inbox_still_sweeps_old_records_at_startup` |
+| L1, L3 | README and threat model: NTP-synced clock; label clashes; `/stop@BotName` and hyphenated labels | docs only |
+
+Notes:
+
+- **The drop reaction is 👎, not ⚠️.** I checked the live Bot API page, and ReactionTypeEmoji does
+  not include ⚠. The coordinator confirmed 👎.
+- **`too_long` and `write_failed` get 👎 as well,** because the rule is every `dropped` outcome. The
+  controller's list did not name these two.
+- **Readers track forged files apart from read commands,** keyed by a fingerprint of the file's
+  content. Otherwise the genuine command that intake writes over a forged file would stay hidden
+  from sessions that already audited the forgery.
+- **The sweep threshold adds 60 s of clock allowance to 86400.** A legitimate record expires
+  `ttl_s` after the later of `received_at` and `sent_at`, so Telegram's clock being slightly ahead
+  could otherwise push it past exactly `now + 86400`.
+- **Remaining risk.** A same-uid process can still delete records or change the directory's mode.
+  This is stated in the threat model.
+- **Fixed an incorrect doc pointer.** I had pointed the README at `mcgram audit --rejected` for
+  drops, but that command lists only `status == "rejected"` (`cli_audit.py:106`). The README now
+  says `mcgram audit --tool _inbox`.
+
+Gates on `796ce9b`:
+
+- ruff: clean.
+- mypy: 37 errors, same as origin/main.
+- `uv run pytest -q --timeout=30`: **686 passed**, up from 679 after the first round and 626 on
+  origin/main.
+- `git diff --check`: clean.
+- No stray processes.
 
 ## Deviations from the plan
 
