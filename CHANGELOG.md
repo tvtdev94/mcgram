@@ -7,6 +7,14 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- `channel add-discord` no longer overwrites another channel's webhook. Names
+  such as `team-a` and `team_a`, or `eve` and `Eve`, derive the same
+  `MCGRAM_DISCORD_WEBHOOK_*` env var; the second add now fails with nothing
+  written instead of repointing the first channel. The same check refuses an
+  `--env-name` that the bot token or ntfy access token already uses, and a
+  channel name with no letters or digits now requires `--env-name`.
+
 ## [0.7.0] — 2026-11-14
 
 ### Changed

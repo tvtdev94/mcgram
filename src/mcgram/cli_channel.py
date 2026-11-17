@@ -156,10 +156,30 @@ def cmd_add_ntfy(args: argparse.Namespace) -> int:
     return 0
 
 
-def _env_name_for(name: str) -> str:
-    """Derive an env var name from a channel name: `eve` -> MCGRAM_DISCORD_WEBHOOK_EVE."""
+def _env_name_for(name: str) -> str | None:
+    """Derive an env var name from a channel name: `eve` -> MCGRAM_DISCORD_WEBHOOK_EVE.
+
+    None when the name has no ASCII letter or digit to build the suffix from.
+    """
     slug = re.sub(r"[^A-Z0-9]+", "_", name.upper()).strip("_")
-    return f"MCGRAM_DISCORD_WEBHOOK_{slug}"
+    return f"MCGRAM_DISCORD_WEBHOOK_{slug}" if slug else None
+
+
+def _env_var_owner(data: dict[str, Any], env: str, channel: str) -> str | None:
+    """Describe what else in the config reads `env`, ignoring `channel` itself.
+
+    Different channel names can derive the same env var (`team-a`, `team_a`), and
+    upserting it into .env would silently repoint the other owner.
+    """
+    for other, ch in (data.get("channels") or {}).items():
+        if other != channel and (ch or {}).get("discord_webhook_env") == env:
+            return f"channel '{other}'"
+    bot_env = (data.get("bot") or {}).get("token_env") or "MCGRAM_BOT_TOKEN"
+    if env == bot_env:
+        return "the Telegram bot token"
+    if env == (data.get("ntfy") or {}).get("access_token_env"):
+        return "the ntfy access token"
+    return None
 
 
 def _probe_webhook(url: str) -> dict[str, Any] | None:
@@ -205,13 +225,24 @@ def _add_discord(
               file=sys.stderr)
         return 1
 
+    resolved_env = env_name or _env_name_for(name)
+    if resolved_env is None:
+        print(f"channel name '{name}' has no letters or digits to name its env var; "
+              "pass --env-name.", file=sys.stderr)
+        return 2
+    owner = _env_var_owner(data, resolved_env, name)
+    if owner:
+        print(f"env var {resolved_env} is already used by {owner}; pick another "
+              "channel name or pass a different --env-name. Nothing was written.",
+              file=sys.stderr)
+        return 1
+
     meta = _probe_webhook(webhook)
     if meta is None:
         print("webhook check failed — Discord did not accept this URL. "
               "Nothing was written.", file=sys.stderr)
         return 1
 
-    resolved_env = env_name or _env_name_for(name)
     env_path = config_path.parent / ".env"
     upsert_env_var(env_path, resolved_env, webhook)
 

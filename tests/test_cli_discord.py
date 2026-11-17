@@ -160,6 +160,87 @@ def test_add_discord_existing_needs_force(tmp_path: Path) -> None:
     assert rc == 1  # already exists, no --force
 
 
+OTHER_WEBHOOK = "https://discord.com/api/webhooks/222/other_token"
+
+
+@pytest.mark.parametrize(
+    ("existing", "existing_env", "new_name", "env_name"),
+    [
+        ("team-a", "MCGRAM_DISCORD_WEBHOOK_TEAM_A", "team_a", None),
+        ("eve", "MCGRAM_DISCORD_WEBHOOK_EVE", "Eve", None),
+        ("eve", "MCGRAM_DISCORD_WEBHOOK_EVE", "deploy", "MCGRAM_DISCORD_WEBHOOK_EVE"),
+    ],
+)
+def test_add_discord_refuses_env_var_of_another_channel(
+    tmp_path: Path, httpx_mock, capsys: pytest.CaptureFixture[str],
+    existing: str, existing_env: str, new_name: str, env_name: str | None,
+) -> None:
+    # Optional: the probe must not be what rejects the second channel.
+    httpx_mock.add_response(url=OTHER_WEBHOOK, method="GET",
+                            json={"channel_id": "5"}, is_optional=True)
+    cfg = _cfg(
+        tmp_path,
+        f"channels:\n  {existing}:\n    transport: discord\n"
+        f"    discord_webhook_env: {existing_env}\n",
+    )
+    env = tmp_path / ".env"
+    env.write_text(f"{existing_env}={WEBHOOK}\n", encoding="utf-8")
+    cfg_before = cfg.read_text(encoding="utf-8")
+    rc = cli_channel._add_discord(
+        name=new_name, webhook=OTHER_WEBHOOK, env_name=env_name,
+        description=None, force=True, config_path=cfg,
+    )
+    assert rc == 1
+    assert env.read_text(encoding="utf-8") == f"{existing_env}={WEBHOOK}\n"
+    assert cfg.read_text(encoding="utf-8") == cfg_before
+    assert existing in capsys.readouterr().err
+
+
+def test_add_discord_refuses_bot_token_env(tmp_path: Path, httpx_mock) -> None:
+    httpx_mock.add_response(url=WEBHOOK, method="GET",
+                            json={"channel_id": "5"}, is_optional=True)
+    cfg = _cfg(tmp_path)
+    env = tmp_path / ".env"
+    env.write_text("MCGRAM_BOT_TOKEN=keepme\n", encoding="utf-8")
+    rc = cli_channel._add_discord(
+        name="eve", webhook=WEBHOOK, env_name="MCGRAM_BOT_TOKEN",
+        description=None, force=False, config_path=cfg,
+    )
+    assert rc == 1
+    assert env.read_text(encoding="utf-8") == "MCGRAM_BOT_TOKEN=keepme\n"
+
+
+def test_add_discord_refuses_name_without_letters_or_digits(
+    tmp_path: Path, httpx_mock
+) -> None:
+    httpx_mock.add_response(url=WEBHOOK, method="GET",
+                            json={"channel_id": "5"}, is_optional=True)
+    cfg = _cfg(tmp_path)
+    rc = cli_channel._add_discord(
+        name="---", webhook=WEBHOOK, env_name=None,
+        description=None, force=False, config_path=cfg,
+    )
+    assert rc == 2
+    assert not (tmp_path / ".env").exists()
+
+
+def test_add_discord_force_reuses_own_env_var(tmp_path: Path, httpx_mock) -> None:
+    httpx_mock.add_response(url=OTHER_WEBHOOK, method="GET", json={"channel_id": "5"})
+    cfg = _cfg(
+        tmp_path,
+        "channels:\n  eve:\n    transport: discord\n"
+        "    discord_webhook_env: MCGRAM_DISCORD_WEBHOOK_EVE\n",
+    )
+    env = tmp_path / ".env"
+    env.write_text(f"MCGRAM_DISCORD_WEBHOOK_EVE={WEBHOOK}\n", encoding="utf-8")
+    rc = cli_channel._add_discord(
+        name="eve", webhook=OTHER_WEBHOOK, env_name=None,
+        description=None, force=True, config_path=cfg,
+    )
+    assert rc == 0
+    assert env.read_text(encoding="utf-8") == f"MCGRAM_DISCORD_WEBHOOK_EVE={OTHER_WEBHOOK}\n"
+
+
 def test_cmd_add_discord_prompts_when_no_webhook(
     tmp_path: Path, httpx_mock, monkeypatch: pytest.MonkeyPatch
 ) -> None:
