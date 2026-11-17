@@ -2,10 +2,11 @@
 
 The operator answers by tapping a button; typed messages are never answers.
 
-Telegram-only: ntfy.sh has no 2-way input. Calls on ntfy channels return
-`transport_unsupported` without contacting any backend.
+Telegram, and ntfy when `ntfy.ask.enabled` is on (see `_ask_ntfy`). Other
+calls on ntfy channels, and every Discord call, return `transport_unsupported`
+without contacting any backend.
 
-Only the process owning the Telegram poll loop receives the operator's tap. A
+On Telegram, only the process owning the poll loop receives the operator's tap. A
 non-owner that posted the question itself would block until timeout while the
 answer lands elsewhere — worse than an error. So a non-owner either hands the
 question to the owner through the opt-in broker (`ask_via_broker`), or refuses
@@ -20,6 +21,7 @@ from typing import Any
 from ..ask_via_broker import ask_via_broker
 from ..errors import ConfigError, RateLimitError, TelegramError, TransportError
 from ..runtime import AppState
+from ._ask_ntfy import ask_ntfy
 from ._ask_refusal import refusal, refusal_payload
 
 TOOL_NAME = "ask"
@@ -37,7 +39,8 @@ def schema() -> dict[str, Any]:
             "multi_select=true lets the operator tick several options and press Done; "
             "value is then a list of the selected labels ([] on timeout). "
             "Blocks the MCP call until reply or timeout — keep timeout_s short. "
-            "REQUIRES a telegram channel; ntfy channels are not supported."
+            "Works on telegram channels, and on ntfy channels when the user enabled "
+            "ntfy.ask (at most 3 options, no multi_select). Discord is not supported."
         ),
         "inputSchema": {
             "type": "object",
@@ -56,7 +59,8 @@ def schema() -> dict[str, Any]:
                 },
                 "channel": {
                     "type": "string",
-                    "description": "Named channel from config (must be telegram)",
+                    "description": "Named channel from config (telegram, or ntfy "
+                                   "with ntfy.ask enabled)",
                 },
                 "multi_select": {
                     "type": "boolean",
@@ -116,7 +120,15 @@ async def handle(
                            "reason": "unknown_channel", "channel": channel})
         return {"error": "invalid_input", "reason": "unknown_channel", "detail": str(e)}
 
+    if dest.transport == "ntfy" and state.ntfy_ask is not None:
+        return await ask_ntfy(state, dest, question=question, options=options,
+                              timeout_s=effective_timeout, multi_select=multi_select,
+                              columns=columns)
     if dest.transport != "telegram":
+        hint = "use send_message on this channel, or switch to a telegram channel"
+        if dest.transport == "ntfy":
+            hint += ("; ntfy ask is opt-in: see `ntfy.ask` in the ntfy section of "
+                     "docs/security-threat-model.md")
         state.audit.write({
             "tool": TOOL_NAME, "status": "rejected",
             "reason": "transport_unsupported",
@@ -129,7 +141,7 @@ async def handle(
                 "and has no reply path"
             ),
             "channel": dest.name,
-            "hint": "use send_message on this channel, or switch to a telegram channel",
+            "hint": hint,
         }
 
     if state.ask_registry is None or state.client is None:

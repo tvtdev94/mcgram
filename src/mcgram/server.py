@@ -21,6 +21,7 @@ from .broker_wiring import build_reminder_store, start_ask_broker
 from .config import Settings
 from .discord_client import DiscordClient
 from .errors import ConfigError, MCGramError
+from .ntfy_ask import NtfyAsk
 from .ntfy_client import NtfyClient
 from .poll_ownership import PollOwnership, cancel_task
 from .polling import poll_loop
@@ -126,6 +127,7 @@ async def _run() -> None:
             discord_client=discord_client,
         )
         _wire_phase3(state)
+        state.ntfy_ask = _build_ntfy_ask(state)
         if state.reminders is not None:
             state.reminders.start()  # reloads saved reminders; overdue ones fire now
         broker_task = start_ask_broker(state)
@@ -133,6 +135,8 @@ async def _run() -> None:
         try:
             await _serve(state)
         finally:
+            if state.ntfy_ask is not None:
+                await state.ntfy_ask.shutdown()
             await cancel_task(broker_task)
             await cancel_task(poll_task)
             if ownership is not None:
@@ -220,6 +224,16 @@ async def _build_clients(settings: Settings):
         if needs_discord:
             discord_client = await stack.enter_async_context(DiscordClient())
         yield tg_client, ntfy_client, discord_client
+
+
+def _build_ntfy_ask(state: AppState) -> NtfyAsk | None:
+    """The ntfy ask registry, when `ntfy.ask` is on and an ntfy client exists."""
+    ntfy = state.settings.ntfy
+    if ntfy is None or not ntfy.ask.enabled or state.ntfy_client is None:
+        return None
+    assert ntfy.ask.reply_topic is not None  # Settings validation guarantees it
+    return NtfyAsk(state.ntfy_client, server=ntfy.server,
+                   reply_topic=ntfy.ask.reply_topic, audit=state.audit)
 
 
 def _wire_phase3(state: AppState) -> None:
