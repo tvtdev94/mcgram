@@ -21,6 +21,7 @@ from .broker_wiring import build_reminder_store, start_ask_broker
 from .config import Settings
 from .discord_client import DiscordClient
 from .errors import ConfigError, MCGramError
+from .inbox_wiring import start_inbox
 from .ntfy_client import NtfyClient
 from .poll_ownership import PollOwnership, cancel_task
 from .polling import poll_loop
@@ -129,11 +130,13 @@ async def _run() -> None:
         if state.reminders is not None:
             state.reminders.start()  # reloads saved reminders; overdue ones fire now
         broker_task = start_ask_broker(state)
+        inbox_task = start_inbox(state)
         ownership, poll_task = _start_polling(state, settings)
         try:
             await _serve(state)
         finally:
             await cancel_task(broker_task)
+            await cancel_task(inbox_task)
             await cancel_task(poll_task)
             if ownership is not None:
                 ownership.release()
