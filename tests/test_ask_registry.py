@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import time
 from typing import Any
 
+import anyio
 import pytest
 
 from mcgram.ask_registry import AskRegistry, _build_keyboard
@@ -254,3 +256,36 @@ async def test_button_answer_echoed_into_message() -> None:
 
 # Suppress "Unused" import on bare envs
 _ = pytest
+
+
+class SuspendingClient(FakeClient):
+    """Edits take a real round trip, as against api.telegram.org."""
+
+    async def edit_message_text(self, *args: Any, **kwargs: Any) -> None:
+        await asyncio.sleep(0.005)
+        await super().edit_message_text(*args, **kwargs)
+
+    async def edit_message_reply_markup(self, *args: Any, **kwargs: Any) -> None:
+        await asyncio.sleep(0.005)
+        await super().edit_message_reply_markup(*args, **kwargs)
+
+
+async def test_cancelled_call_still_retires_the_question() -> None:
+    # MCP cancels a call (Esc, or the session closing) through an anyio cancel
+    # scope, which re-cancels every await inside it, the cleanup included.
+    client = SuspendingClient()
+    reg = AskRegistry()
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(functools.partial(
+            reg.open, client, chat_id=42, question="Deploy?", options=["Yes", "No"],
+            timeout_s=30,
+        ))
+        while not client.sent:
+            await asyncio.sleep(0.005)
+        tg.cancel_scope.cancel()
+    message_id = client.sent[0]["message_id"]
+    assert client.edited == [
+        {"kind": "text", "message_id": message_id,
+         "text": "Deploy?\n\n⏹ mcgram stopped before an answer"},
+        {"kind": "markup", "message_id": message_id, "reply_markup": None},
+    ]

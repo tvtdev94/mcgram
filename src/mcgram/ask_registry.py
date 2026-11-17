@@ -11,6 +11,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+import anyio
+
 if TYPE_CHECKING:
     from .tg_client import TelegramClient
 
@@ -263,17 +265,18 @@ async def _mark_abandoned(
 ) -> None:
     """Say the question is dead and drop its buttons, on the way out.
 
-    Runs while the process shuts down, so it is bounded and never sleeps out a
-    flood wait: a stuck edit must not hold up the exit.
+    Runs while the call is being cancelled. MCP cancels through an anyio
+    cancel scope, which re-cancels every later await, so the edits run
+    shielded. They are bounded and never sleep out a flood wait: a stuck edit
+    must not hold up the exit.
     """
-    async def retire() -> None:
+    with anyio.CancelScope(
+        shield=True, deadline=anyio.current_time() + _ABANDON_EDIT_TIMEOUT_S,
+    ) as scope:
         with contextlib.suppress(Exception):
             await client.edit_message_text(
                 chat_id, message_id, stopped_text(question), retry_flood_wait=False,
             )
         await _strip_keyboard(client, chat_id, message_id, retry_flood_wait=False)
-
-    try:
-        await asyncio.wait_for(retire(), timeout=_ABANDON_EDIT_TIMEOUT_S)
-    except TimeoutError:
+    if scope.cancelled_caught:
         log.debug("retiring an abandoned question timed out (non-fatal)")
