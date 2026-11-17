@@ -186,6 +186,10 @@ class BrokerConfig(BaseModel):
     tmp_grace_s: int = Field(300, ge=1)
 
 
+#: Longest `inbox.ttl_s`; also bounds how far ahead a stored record may claim to expire.
+INBOX_TTL_MAX_S = 86400
+
+
 class InboxConfig(BaseModel):
     """Operator commands typed to the bot, read by Claude via `check_inbox`. DEFAULT OFF.
 
@@ -197,7 +201,7 @@ class InboxConfig(BaseModel):
     enabled: bool = False
     # How long a command stays readable after it was received; an update older
     # than this when it reaches the poller is dropped as stale.
-    ttl_s: int = Field(default=1800, ge=60, le=86400)
+    ttl_s: int = Field(default=1800, ge=60, le=INBOX_TTL_MAX_S)
 
 
 DEFAULT_CHANNEL = "default"

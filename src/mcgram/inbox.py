@@ -10,6 +10,7 @@ docs/security-threat-model.md.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -22,11 +23,13 @@ from collections.abc import Collection
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, TypeGuard
 
+from .config import INBOX_TTL_MAX_S
 from .spool import Spool, heartbeat_status
 
 if TYPE_CHECKING:
     from .audit import AuditLog
     from .rate_limiter import RateLimiter
+    from .tg_client import TelegramClient
     from .update_dispatcher import UpdateHandler
 
 log = logging.getLogger("mcgram.inbox")
@@ -44,13 +47,25 @@ HEARTBEAT_KIND = "heartbeat"
 RECORD_KIND = "cmd"
 #: Telegram sends `/start` when a chat with the bot is first opened.
 RESERVED_COMMANDS = frozenset({"start"})
-#: Bucket name for intake in the shared `RateLimiter`.
+#: The only commands stored. The skill defines what each one means to Claude.
+ALLOWED_COMMANDS = frozenset({"status", "stop", "note"})
+#: Bucket names in the shared `RateLimiter`.
 INTAKE_BUCKET = "_inbox_intake"
+DROP_BUCKET = "_inbox_drop"
+#: Reaction put on an operator command that intake dropped. Must be on Telegram's
+#: ReactionTypeEmoji list, which has no warning sign.
+DROP_REACTION = "👎"
+REACTION_TIMEOUT_S = 5.0
 
 _COMMAND_RE = re.compile(
     r"/([A-Za-z0-9_]{1,32})(?:@([A-Za-z0-9_]{1,32}))?(?:\s+(.*))?", re.DOTALL
 )
+#: `/stop @api` — a target typed after a space would otherwise broadcast.
+_SPACED_TARGET_RE = re.compile(r"@[A-Za-z0-9_]{1,32}(?:\s|$)")
 _KEEP_CONTROL = frozenset("\n\t")
+#: Control, format, and surrogate code points. A lone surrogate cannot be
+#: encoded as UTF-8 at all, so it would break signing the record.
+_DROPPED_CATEGORIES = frozenset({"Cc", "Cf", "Cs"})
 _FORWARD_FIELDS = ("forward_origin", "forward_date", "is_automatic_forward")
 
 #: (status, reason) for an update that is not stored.
@@ -83,14 +98,14 @@ def _as_dict(value: object) -> dict[str, Any]:
 
 
 def sanitize(text: str) -> str:
-    """Drop control and invisible format characters (Cc, Cf), keeping newline and tab.
+    """Drop control, invisible format and lone surrogate characters, keeping newline and tab.
 
-    They render as nothing in a terminal or a prompt, so they could hide words
-    from the operator's own reading of what Claude was told.
+    The first two render as nothing in a terminal or a prompt, so they could hide
+    words from the operator's own reading of what Claude was told.
     """
     return "".join(
         ch for ch in text
-        if ch in _KEEP_CONTROL or unicodedata.category(ch) not in ("Cc", "Cf")
+        if ch in _KEEP_CONTROL or unicodedata.category(ch) not in _DROPPED_CATEGORIES
     )
 
 
@@ -125,13 +140,17 @@ def parse_update(update: dict[str, Any], operator_chat_id: int) -> Command | Ref
     command = match.group(1).lower()
     if command in RESERVED_COMMANDS:
         return "ignored", "reserved"
+    if command not in ALLOWED_COMMANDS:
+        return "dropped", "unknown_command"
+    target = match.group(2)
     args = (match.group(3) or "").strip()
+    if target is None and _SPACED_TARGET_RE.match(args):
+        return "dropped", "ambiguous_target"
     if len(args) > TEXT_MAX_CHARS:
         return "dropped", "too_long"
     update_id, message_id, sent_at = update.get("update_id"), msg.get("message_id"), \
         msg.get("date")
     if _is_int(update_id) and _is_int(message_id) and _is_int(sent_at):
-        target = match.group(2)
         return Command(
             update_id=update_id, message_id=message_id, chat_id=operator_chat_id,
             command=command, target=target.lower() if target else None,
@@ -160,6 +179,36 @@ def _update_id(key: str) -> int:
     return int(key[1:])
 
 
+def _fingerprint(rec: dict[str, Any]) -> str:
+    """Identifies a file's content, so a changed forgery is audited again."""
+    canonical = json.dumps(rec, sort_keys=True, default=str)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+
+
+def sweep_records(spool: Spool, now: float, *, tmp_grace_s: int) -> int:
+    """Expire records, and remove command files that claim to live longer than
+    any `inbox.ttl_s` can make them — only a planted file does, and it would
+    otherwise sit there until its claimed expiry."""
+    removed = spool.sweep(now, tmp_grace_s=tmp_grace_s)
+    horizon = now + INBOX_TTL_MAX_S + CLOCK_ALLOWANCE_S
+    for key, rec in spool.list(RECORD_KIND):
+        expires_at = rec.get("expires_at")
+        if _is_number(expires_at) and expires_at > horizon and spool.remove(key, RECORD_KIND):
+            removed += 1
+    return removed
+
+
+async def send_reaction(
+    client: TelegramClient, chat_id: int, message_id: int, emoji: str
+) -> None:
+    """Best effort: never raises, never retries a flood wait, gives up after 5 s."""
+    try:
+        await asyncio.wait_for(
+            client.set_message_reaction(chat_id, message_id, emoji), REACTION_TIMEOUT_S)
+    except Exception as e:  # a reaction is only a signal; any failure is only logged
+        log.info("inbox: %s reaction on message %s failed: %s", emoji, message_id, e)
+
+
 class InboxStore:
     """Signed command records plus the polling session's heartbeat, in one spool namespace."""
 
@@ -181,18 +230,25 @@ class InboxStore:
     # --- intake (polling session only) -----------------------------------
 
     def publish(self, cmd: Command, now: float) -> str:
-        """Store `cmd`. Returns "queued", "duplicate", or a drop reason.
+        """Store `cmd`. Returns "queued", "replaced", "duplicate", or a drop reason.
 
         A record lives for `ttl_s` past the later of its Telegram date and its
         receipt, and an update must be younger than `ttl_s`, so a redelivery
         that arrives after the record was swept is already stale — even when
         our clock runs behind Telegram's: sweep timing cannot reopen dedupe.
+
+        A file already under this update's name counts as a duplicate only when
+        it is a genuine record. Anything else there — planted, tampered, or
+        half-written — is replaced ("replaced"), so it cannot mute the command.
         """
         if now - cmd.sent_at > self._ttl_s:
             return "stale"
         key = _key_for(cmd.update_id)
-        if len(self.keys()) >= MAX_PENDING:
-            return "duplicate" if self._exists(key) else "inbox_full"
+        occupied = self._exists(key)
+        if occupied and self._genuine(key) is not None:
+            return "duplicate"
+        if self._live_count(now) >= MAX_PENDING:
+            return "inbox_full"
         record: dict[str, Any] = {
             "protocol": PROTOCOL_VERSION,
             "update_id": cmd.update_id,
@@ -207,13 +263,33 @@ class InboxStore:
             "expires_at": max(now, cmd.sent_at) + self._ttl_s,
         }
         record["sig"] = _signature(self._key, record)
+        if occupied:
+            return "replaced" if self.spool.write(key, RECORD_KIND, record) else "write_failed"
         if self.spool.write_exclusive(key, RECORD_KIND, record):
             return "queued"
-        return "duplicate" if self._exists(key) else "write_failed"
+        # Lost a race with another poller, or the disk refused the write.
+        return "duplicate" if self._genuine(key) is not None else "write_failed"
 
     def _exists(self, key: str) -> bool:
         path = self.spool.path_for(key, RECORD_KIND)
         return path is not None and path.exists()
+
+    def _genuine(self, key: str) -> dict[str, Any] | None:
+        rec = self.spool.read(key, RECORD_KIND)
+        return rec if rec is not None and self._authentic(key, rec) else None
+
+    def _live_count(self, now: float) -> int:
+        """Signed, unexpired records, counted up to the cap. Junk files a local
+        process plants, and records already past their expiry, never fill it."""
+        live = 0
+        for key in self.keys():
+            rec = self._genuine(key)
+            expires_at = rec.get("expires_at") if rec is not None else None
+            if _is_number(expires_at) and expires_at >= now:
+                live += 1
+                if live >= MAX_PENDING:
+                    break
+        return live
 
     # --- readers (every session) -----------------------------------------
 
@@ -224,20 +300,22 @@ class InboxStore:
 
     def unread(
         self, seen: Collection[str], label: str, since: float, now: float
-    ) -> tuple[list[dict[str, Any]], list[str]]:
-        """(commands for this session oldest first, keys whose signature failed).
+    ) -> tuple[list[dict[str, Any]], list[tuple[str, str]]]:
+        """(commands for this session oldest first, (key, fingerprint) of forged files).
 
-        A file that does not parse is skipped without being marked: an
+        A file that does not parse is skipped without being reported: an
         `O_EXCL` record is written in place, so it can be read half-written.
+        A forged file is reported with a fingerprint of its content, because
+        intake may later replace it with the genuine command of that name.
         """
         found: list[dict[str, Any]] = []
-        forged: list[str] = []
+        forged: list[tuple[str, str]] = []
         for key in sorted(self.keys().difference(seen), key=_update_id):
             rec = self.spool.read(key, RECORD_KIND)
             if rec is None or rec.get("protocol") != PROTOCOL_VERSION:
                 continue
             if not self._authentic(key, rec):
-                forged.append(key)
+                forged.append((key, _fingerprint(rec)))
                 continue
             if self._visible(rec, label, since, now):
                 found.append({**rec, "id": key})
@@ -292,10 +370,27 @@ class InboxStore:
 
 
 def make_intake(
-    store: InboxStore, rate: RateLimiter, audit: AuditLog, operator_chat_id: int
+    store: InboxStore,
+    rate: RateLimiter,
+    audit: AuditLog,
+    operator_chat_id: int,
+    client: TelegramClient | None,
 ) -> UpdateHandler:
-    """The dispatcher handler that stores commands. Local file I/O only: it runs
-    inside the poll loop, and a network call here would stall `getUpdates`."""
+    """The dispatcher handler that stores commands.
+
+    It runs inside the poll loop, so it does local file I/O only. The one
+    network call — a 👎 on an operator command it had to drop, so a lost
+    `/stop` is visible in the chat — runs in a background task.
+    """
+    senders: set[asyncio.Task[None]] = set()
+
+    def signal_drop(message_id: Any) -> None:
+        if client is None or not _is_int(message_id) or not rate.try_acquire(DROP_BUCKET):
+            return
+        task = asyncio.create_task(
+            send_reaction(client, operator_chat_id, message_id, DROP_REACTION))
+        senders.add(task)  # keep a reference until it finishes
+        task.add_done_callback(senders.discard)
 
     async def intake(update: dict[str, Any]) -> None:
         parsed = parse_update(update, operator_chat_id)
@@ -305,20 +400,25 @@ def make_intake(
         if not isinstance(parsed, Command):
             record["status"], record["reason"] = parsed
             audit.write(record)
+            if record["status"] == "dropped":  # the operator's own command, refused
+                signal_drop(_as_dict(update.get("message")).get("message_id"))
             return
         record.update(message_id=parsed.message_id, command=parsed.command,
                       target=parsed.target, text=parsed.args)
         outcome = (store.publish(parsed, time.time())
                    if rate.try_acquire(INTAKE_BUCKET) else "rate_limited")
-        if outcome == "duplicate":
-            log.debug("inbox: update %s already stored", parsed.update_id)
-            return
-        if outcome == "queued":
+        if outcome in ("queued", "replaced"):
             record["status"] = "queued"
+            if outcome == "replaced":
+                log.warning("inbox: replaced a forged file under update %s", parsed.update_id)
+                record["replaced"] = "bad_signature"
+        elif outcome == "duplicate":
+            record["status"], record["reason"] = "ignored", "duplicate"
         else:
             record["status"], record["reason"] = "dropped", outcome
             if outcome == "write_failed":
                 log.warning("inbox: could not store update %s", parsed.update_id)
+            signal_drop(parsed.message_id)
         audit.write(record)
 
     return intake

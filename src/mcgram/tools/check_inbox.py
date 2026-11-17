@@ -14,6 +14,7 @@ import os
 import time
 from typing import Any
 
+from ..inbox import send_reaction
 from ..inbox_wiring import InboxSession
 from ..reminders import _iso
 from ..runtime import AppState
@@ -23,7 +24,6 @@ log = logging.getLogger("mcgram.inbox")
 TOOL_NAME = "check_inbox"
 MAX_RESULTS = 20
 READ_RECEIPT = "👀"
-REACTION_TIMEOUT_S = 5.0
 #: Bucket name for read receipts in the shared `RateLimiter`.
 REACT_BUCKET = "_inbox_react"
 
@@ -120,9 +120,11 @@ def _read(state: AppState, session: InboxSession) -> list[dict[str, Any]]:
     assert session.store is not None
     found, forged = session.store.unread(session.seen, session.label,
                                          session.started_at, time.time())
-    for key in forged:
-        # Once per session: marking it seen keeps it from being audited each call.
-        session.mark_seen(key, time.time() + state.settings.inbox.ttl_s)
+    for key, fingerprint in forged:
+        # Once per session and content: a changed forgery is audited again.
+        if session.forged.get(key, ("", 0.0))[0] == fingerprint:
+            continue
+        session.forged[key] = (fingerprint, time.time() + state.settings.inbox.ttl_s)
         log.warning("inbox: %s failed its signature check; ignoring it", key)
         state.audit.write({"tool": TOOL_NAME, "status": "rejected",
                            "reason": "bad_signature", "update_id": int(key[1:])})
@@ -134,10 +136,4 @@ async def _read_receipt(state: AppState, rec: dict[str, Any]) -> None:
     client = state.client
     if client is None or not state.rate.try_acquire(REACT_BUCKET):
         return
-    try:
-        await asyncio.wait_for(
-            client.set_message_reaction(rec["chat_id"], rec["message_id"], READ_RECEIPT),
-            REACTION_TIMEOUT_S,
-        )
-    except Exception as e:  # a receipt is best effort; any failure is only logged
-        log.info("inbox: read receipt for %s failed: %s", rec["id"], e)
+    await send_reaction(client, rec["chat_id"], rec["message_id"], READ_RECEIPT)

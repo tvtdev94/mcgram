@@ -21,7 +21,8 @@ from typing import TYPE_CHECKING
 
 from .broker_wiring import safe_spool
 from .errors import ConfigError
-from .inbox import InboxStore, make_intake, signing_key
+from .inbox import InboxStore, make_intake, signing_key, sweep_records
+from .spool import Spool
 
 if TYPE_CHECKING:
     from .runtime import AppState
@@ -41,10 +42,14 @@ _HEARTBEAT_MAX_PERIOD_S = 10.0
 class InboxSession:
     """This session's view of the inbox. `store` is None when `unavailable` says why.
 
-    `seen` maps each record this session has read (or found forged) to the time
-    it stops mattering: the record's own expiry. It is pruned by that time only,
-    never by what a directory listing shows — a listing that fails reads as an
-    empty inbox, and forgetting on that basis would replay every command.
+    `seen` maps each record this session has read to the time it stops
+    mattering: the record's own expiry. It is pruned by that time only, never by
+    what a directory listing shows — a listing that fails reads as an empty
+    inbox, and forgetting on that basis would replay every command.
+
+    `forged` maps each forged file already audited to (content fingerprint,
+    forget time). It is kept apart from `seen`: intake replaces a forged file
+    with the genuine command of the same name, which must still be read.
     """
 
     label: str
@@ -52,6 +57,7 @@ class InboxSession:
     store: InboxStore | None
     unavailable: str | None = None
     seen: dict[str, float] = field(default_factory=dict)
+    forged: dict[str, tuple[str, float]] = field(default_factory=dict)
 
     def mark_seen(self, key: str, until: float) -> None:
         self.seen[key] = max(until, self.seen.get(key, until))
@@ -60,6 +66,8 @@ class InboxSession:
         """Drop entries past their expiry; such a record is never shown again anyway."""
         for key in [k for k, until in self.seen.items() if until < now]:
             del self.seen[key]
+        for key in [k for k, (_, until) in self.forged.items() if until < now]:
+            del self.forged[key]
 
 
 def session_label() -> str:
@@ -86,6 +94,7 @@ def start_inbox(state: AppState) -> asyncio.Task[None] | None:
     """
     settings = state.settings
     if not settings.inbox.enabled:
+        _sweep_left_behind(state)
         return None
     label = session_label()
     store, reason = _build_store(state)
@@ -97,8 +106,25 @@ def start_inbox(state: AppState) -> asyncio.Task[None] | None:
     log.info("operator inbox on; this session's label is %r", label)
     bot = settings.bot
     assert bot is not None  # _build_store refuses a config without one
-    state.dispatcher.register(make_intake(store, state.rate, state.audit, bot.operator_chat_id))
+    state.dispatcher.register(make_intake(store, state.rate, state.audit, bot.operator_chat_id,
+                                          state.client))
     return asyncio.create_task(supervise(state, state.inbox, store), name="mcgram-inbox")
+
+
+def _sweep_left_behind(state: AppState) -> None:
+    """With the inbox off, still expire records from when it was on, once.
+
+    Nothing else would ever remove them, and they hold command text. A missing
+    directory is left missing: the safety probe would create it.
+    """
+    spool = Spool(state.settings.spool_root, INBOX_NAMESPACE)
+    if not spool.dir.is_dir():
+        return
+    safe, reason = safe_spool(state.settings, INBOX_NAMESPACE)
+    if safe is None:
+        log.warning("not sweeping the old inbox spool at %s: %s", spool.dir, reason)
+        return
+    sweep_records(safe, time.time(), tmp_grace_s=state.settings.broker.tmp_grace_s)
 
 
 def _build_store(state: AppState) -> tuple[InboxStore | None, str | None]:
@@ -147,7 +173,7 @@ async def supervise(state: AppState, session: InboxSession, store: InboxStore) -
                     last_beat, beating = -math.inf, False
                 if now - last_sweep >= cfg.sweep_interval_s:
                     last_sweep = now
-                    store.spool.sweep(tmp_grace_s=cfg.tmp_grace_s)
+                    sweep_records(store.spool, time.time(), tmp_grace_s=cfg.tmp_grace_s)
                     session.forget_expired(time.time())
             except Exception:
                 log.exception("inbox supervisor tick failed")

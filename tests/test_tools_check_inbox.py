@@ -147,9 +147,9 @@ async def test_every_session_reads_a_command_once(world: World, httpx_mock: Any)
 async def test_addressed_commands_reach_only_their_label(world: World, httpx_mock: Any) -> None:
     httpx_mock.add_response(url=REACT_URL, json=_OK, is_reusable=True)
     me = await world.reader("me")
-    await world.send("/x@other", update_id=1)
-    await world.send("/x@ME", update_id=2)
-    await world.send("/x", update_id=3)
+    await world.send("/status@other", update_id=1)
+    await world.send("/status@ME", update_id=2)
+    await world.send("/status", update_id=3)
     assert _ids(await check_inbox.handle(me)) == ["u2", "u3"]
     other = await world.reader("other")
     assert _ids(await check_inbox.handle(other)) == ["u1", "u3"]
@@ -167,13 +167,27 @@ async def test_commands_sent_before_the_session_started_are_hidden(
 
 
 async def test_expired_records_are_hidden_before_the_sweep(world: World) -> None:
+    """A session older than ttl_s: the command was sent after it started, so only
+    the record's expiry keeps a long-running session from reading it late."""
     me = await world.reader()
-    store = world.owner.inbox.store
-    long_ago = time.time() - world.settings.inbox.ttl_s - 10
+    ttl = world.settings.inbox.ttl_s
+    me.inbox.started_at = time.time() - ttl - 100
+    sent = me.inbox.started_at + 10
     cmd = Command(update_id=1, message_id=5, chat_id=OPERATOR, command="stop",
-                  target=None, args="", sent_at=int(long_ago))
-    assert store.publish(cmd, long_ago) == "queued"
+                  target=None, args="", sent_at=int(sent))
+    assert world.owner.inbox.store.publish(cmd, sent) == "queued"
     assert (await check_inbox.handle(me))["commands"] == []
+
+
+async def test_a_forged_file_replaced_by_the_real_command_is_read(
+    world: World, httpx_mock: Any
+) -> None:
+    httpx_mock.add_response(url=REACT_URL, json=_OK)
+    me = await world.reader()
+    _plant_unsigned(Spool(world.settings.spool_root, INBOX_NAMESPACE).dir / "u1.cmd.json")
+    assert (await check_inbox.handle(me))["commands"] == []  # forged: audited, skipped
+    await world.send("/stop", update_id=1)  # intake verifies and replaces the forged file
+    assert _ids(await check_inbox.handle(me)) == ["u1"]
 
 
 async def test_a_failed_audit_write_does_not_lose_the_command(
