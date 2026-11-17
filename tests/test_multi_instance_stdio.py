@@ -38,7 +38,9 @@ _UNREACHABLE = "http://127.0.0.1:9"  # discard port — refuses instantly
 _OPERATOR = 12345
 
 
-def _write_config(home: Path, *, api_root: str = _UNREACHABLE, broker: bool = False) -> Path:
+def _write_config(
+    home: Path, *, api_root: str = _UNREACHABLE, broker: bool = False, inbox: bool = False
+) -> Path:
     cfg = home / "config.yaml"
     cfg.write_text(
         f"""
@@ -51,6 +53,8 @@ broker:
   enabled: {str(broker).lower()}
   spool_dir: {(home / 'spool').as_posix()}
   poll_interval_s: 0.05
+inbox:
+  enabled: {str(inbox).lower()}
 api_root: {api_root}
 """,
         encoding="utf-8",
@@ -60,10 +64,12 @@ api_root: {api_root}
 
 class _TelegramStub:
     """Just enough Bot API for the owner: getUpdates, sendMessage, the two
-    edits, answerCallbackQuery. Tests inject updates with `push`."""
+    edits, answerCallbackQuery. Tests inject updates with `push`; every call
+    is recorded in `calls` as (method, form)."""
 
     def __init__(self) -> None:
         self.sent: list[dict[str, Any]] = []
+        self.calls: list[tuple[str, dict[str, str]]] = []
         self._updates: list[dict[str, Any]] = []
         self._cond = threading.Condition()
         stub = self
@@ -89,6 +95,8 @@ class _TelegramStub:
         threading.Thread(target=self._server.serve_forever, daemon=True).start()
 
     def handle(self, method: str, form: dict[str, str]) -> Any:
+        with self._cond:
+            self.calls.append((method, form))
         if method == "getUpdates":
             offset = int(form.get("offset", 0))
             with self._cond:
@@ -269,6 +277,7 @@ def test_two_instances_both_complete_handshake(
         # so the MCP client's cached tool list never goes stale.
         assert first.tool_names() == second.tool_names()
         assert "ask" in second.tool_names()
+        assert "check_inbox" not in second.tool_names()  # the inbox is off by default
     finally:
         second.close()
         first.close()
@@ -445,3 +454,41 @@ def _lock_holder_alive(home: Path) -> bool:
     from mcgram.lock import _pid_alive
 
     return _pid_alive(_lock_owner_pid(home))
+
+
+# --- operator inbox: a command polled by one session, read by another -------
+
+
+def test_non_polling_session_reads_an_addressed_command(
+    tmp_path: Path, repo_root: Path, stub: _TelegramStub
+) -> None:
+    cfg = _write_config(tmp_path, api_root=stub.url, inbox=True)
+    alpha = _McgramProcess(cfg, repo_root, tmp_path, "alpha",
+                           extra_env={"MCGRAM_SESSION_LABEL": "alpha"})
+    beta: _McgramProcess | None = None
+    try:
+        alpha.initialize()
+        # Only the polling session beats, so this also proves alpha owns polling.
+        heartbeat = Settings.load(cfg).spool_root / "inbox" / "u0.heartbeat.json"
+        _wait(heartbeat.exists, "the polling session's inbox heartbeat")
+        beta = _McgramProcess(cfg, repo_root, tmp_path, "beta", extra_env={
+            "MCGRAM_SESSION_LABEL": "beta", "MCGRAM_POLL_RETRY_S": "600"})
+        beta.initialize()
+        assert "check_inbox" in alpha.tool_names()
+        assert "check_inbox" in beta.tool_names()
+
+        stub.push({"message": {
+            "message_id": 9, "date": int(time.time()),
+            "chat": {"id": _OPERATOR, "type": "private"},
+            "from": {"id": _OPERATOR, "is_bot": False}, "text": "/stop@beta now"}})
+        out = beta.call_tool("check_inbox", {"wait_s": 10})
+        assert (out["label"], out["receiving"]) == ("beta", True), out
+        assert [(c["command"], c["target"], c["args"]) for c in out["commands"]] == \
+            [("stop", "beta", "now")]
+        assert alpha.call_tool("check_inbox", {})["commands"] == []  # addressed to beta
+        reactions = [form for method, form in stub.calls if method == "setMessageReaction"]
+        assert [int(f["message_id"]) for f in reactions] == [9]
+    finally:
+        if beta is not None:
+            beta.close()
+        alpha.close()
