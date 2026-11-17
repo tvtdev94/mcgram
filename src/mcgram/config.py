@@ -39,10 +39,27 @@ class BotConfig(BaseModel):
         return v
 
 
+# ntfy's own topic-name rule (`topicRegex` in the ntfy server's server.go).
+NTFY_TOPIC_RE = re.compile(r"^[-_A-Za-z0-9]{1,64}$")
+
+
+class NtfyAskConfig(BaseModel):
+    """Two-way `ask` over ntfy. DEFAULT OFF.
+
+    Turning it on makes the reply topic an inbound path: a tap on a question's
+    button posts there, and mcgram subscribes to it while a question is open.
+    Read the ntfy section of docs/security-threat-model.md first.
+    """
+
+    enabled: bool = False
+    reply_topic: str | None = None
+
+
 class NtfyConfig(BaseModel):
     server: str = "https://ntfy.sh"
     default_topic: str | None = None
     access_token_env: str | None = None
+    ask: NtfyAskConfig = Field(default_factory=NtfyAskConfig)
 
     @field_validator("server")
     @classmethod
@@ -297,6 +314,40 @@ class Settings(BaseModel):
                 transport="telegram",
                 chat_id=self.bot.operator_chat_id,
                 description="Auto-created from bot.operator_chat_id (send-only)",
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _check_ntfy_ask(self) -> Settings:
+        """Refuse an enabled `ntfy.ask` that would be unsafe or cannot work.
+
+        Runs after the default channel is seeded, so every question topic a
+        channel can resolve to is compared with the reply topic.
+        """
+        if self.ntfy is None or not self.ntfy.ask.enabled:
+            return self
+        reply = self.ntfy.ask.reply_topic
+        if not reply:
+            raise ValueError("ntfy.ask.reply_topic is required when ntfy.ask.enabled is true")
+        if not NTFY_TOPIC_RE.fullmatch(reply):
+            raise ValueError(
+                "ntfy.ask.reply_topic must be 1-64 characters of A-Z, a-z, 0-9, '-' or '_'"
+            )
+        if not self.ntfy.access_token_env:
+            raise ValueError(
+                "ntfy.ask needs ntfy.access_token_env: ask over ntfy requires an access "
+                "token and read-protected topics (see the ntfy section of "
+                "docs/security-threat-model.md)"
+            )
+        question_topics = {self.ntfy.default_topic} | {
+            c.ntfy_topic for c in self.channels.values() if c.transport == "ntfy"
+        }
+        if reply in question_topics:
+            # Anyone may post to the reply topic, so a question posted there
+            # could be forged by anyone.
+            raise ValueError(
+                "ntfy.ask.reply_topic must differ from ntfy.default_topic and every "
+                "ntfy channel topic: anyone can post to the reply topic"
             )
         return self
 

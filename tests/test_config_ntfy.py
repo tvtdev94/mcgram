@@ -263,3 +263,72 @@ channels:
     assert s.resolve_destination("alerts").ntfy_topic == "mcgram-alerts"
     assert s.resolve_destination("team").transport == "telegram"
     assert s.resolve_destination("team").chat_id == -1001
+
+
+# --------------------------------------------------------------------------- #
+# ntfy.ask (opt-in two-way ask over ntfy)
+# --------------------------------------------------------------------------- #
+
+_ASK_BASE = """
+ntfy:
+  default_topic: mcgram-q-0123abcd
+{token}  ask:
+    enabled: true
+{reply}channels:
+  alerts:
+    transport: ntfy
+    ntfy_topic: mcgram-alerts
+"""
+
+
+def _ask_yaml(
+    *, token: bool = True, reply: str | None = "mcgram-r-0123abcd"
+) -> str:
+    return _ASK_BASE.format(
+        token="  access_token_env: NTFY_TOKEN\n" if token else "",
+        reply=f"    reply_topic: {reply}\n" if reply is not None else "",
+    )
+
+
+def test_ntfy_ask_is_off_by_default_and_existing_configs_load(tmp_path: Path) -> None:
+    s = _write(tmp_path / "c.yaml", "ntfy:\n  default_topic: mcgram-abc123\n")
+    assert s.ntfy is not None
+    assert s.ntfy.ask.enabled is False
+    assert s.ntfy.ask.reply_topic is None
+
+
+def test_ntfy_ask_enabled_with_token_and_reply_topic_loads(tmp_path: Path) -> None:
+    s = _write(tmp_path / "c.yaml", _ask_yaml())
+    assert s.ntfy is not None
+    assert s.ntfy.ask.enabled is True
+    assert s.ntfy.ask.reply_topic == "mcgram-r-0123abcd"
+
+
+@pytest.mark.parametrize(
+    ("body", "match"),
+    [
+        (_ask_yaml(reply=None), "reply_topic is required"),
+        (_ask_yaml(reply="bad/topic"), "reply_topic"),
+        (_ask_yaml(reply="x" * 65), "reply_topic"),
+        (_ask_yaml(token=False), "access_token_env"),
+        (_ask_yaml(reply="mcgram-q-0123abcd"), "must differ"),
+        (_ask_yaml(reply="mcgram-alerts"), "must differ"),
+    ],
+    ids=["missing", "bad-charset", "too-long", "no-token", "is-default-topic",
+         "is-channel-topic"],
+)
+def test_ntfy_ask_enabled_refuses_unsafe_config(
+    tmp_path: Path, body: str, match: str
+) -> None:
+    with pytest.raises(ConfigError, match=match):
+        _write(tmp_path / "c.yaml", body)
+
+
+def test_ntfy_ask_disabled_skips_its_validation(tmp_path: Path) -> None:
+    # A half-written `ask:` block must not break a config that leaves it off.
+    s = _write(
+        tmp_path / "c.yaml",
+        "ntfy:\n  default_topic: mcgram-q\n  ask:\n    enabled: false\n"
+        "    reply_topic: mcgram-q\n",
+    )
+    assert s.ntfy is not None and s.ntfy.ask.enabled is False
