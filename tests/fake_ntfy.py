@@ -60,6 +60,10 @@ class FakeNtfy:
         self.stream_since: list[str | None] = []
         self.poll_since: list[str | None] = []
         self.on_poll: Callable[[], list[dict[str, Any]] | int] = list
+        self.poll_hangs = False
+        # Raised on the question publish AFTER it is recorded, as when ntfy
+        # stored the message but the response was lost.
+        self.question_publish_error: Exception | None = None
         # (message id, JSON payload) for every publish, questions and markers.
         self.published: list[tuple[str, dict[str, Any]]] = []
         self.unexpected: list[str] = []
@@ -92,6 +96,9 @@ class FakeNtfy:
     # -- routing ------------------------------------------------------------ #
 
     async def _handle(self, request: httpx.Request) -> httpx.Response:
+        # A real round trip suspends; code that only works when every await
+        # completes synchronously must fail here.
+        await asyncio.sleep(0.005)
         path, params = request.url.path, request.url.params
         authed = request.headers.get("Authorization") == f"Bearer {TOKEN}"
         if request.method == "POST" and path == "/" and authed:
@@ -101,6 +108,9 @@ class FakeNtfy:
             if params.get("poll") == "1" and "Authorization" not in request.headers:
                 return httpx.Response(self.probe_status.get(topic, 403))
             if topic == REPLY_TOPIC and authed and params.get("poll") == "1":
+                if self.poll_hangs:
+                    self.poll_since.append(params.get("since"))
+                    await asyncio.Event().wait()
                 return self._poll(params.get("since"))
             if topic == REPLY_TOPIC and authed:
                 return self._subscribe(params.get("since"))
@@ -112,6 +122,8 @@ class FakeNtfy:
         self.published.append((msg_id, payload))
         if "actions" in payload:
             self._questions.put_nowait((msg_id, payload))
+            if self.question_publish_error is not None:
+                raise self.question_publish_error
         return httpx.Response(200, json={"id": msg_id, "time": OPEN_TIME,
                                          "event": "message", "topic": payload["topic"]})
 

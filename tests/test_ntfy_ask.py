@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+import anyio
 import pytest
 
 from mcgram.audit import AuditLog
@@ -268,6 +269,23 @@ async def test_auth_failure_on_the_subscription_fails_the_ask_at_once(
     assert exc.value.posted is True
     assert ("_ntfy_reply", "auth") in [
         (r["tool"], r.get("reason")) for r in _audit_lines(audit) if r["status"] == "error"]
+
+
+async def test_cancelled_call_retires_the_question_and_leaves_no_task(
+    asker: NtfyAsk, fake: FakeNtfy
+) -> None:
+    # MCP cancels a call (Esc, or the session closing) through an anyio cancel
+    # scope, which re-cancels every await inside it, the cleanup included.
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(asker.open, QUESTION_TOPIC, "Deploy?", OPTIONS, 30)
+        q_msg_id, _ = await fake.next_question()
+        tg.cancel_scope.cancel()
+    assert len(fake.published) == 2, "the question was never retired"
+    _, marker = fake.published[-1]
+    assert marker["sequence_id"] == q_msg_id
+    assert "stopped" in marker["message"]
+    current = asyncio.current_task()
+    assert [t for t in asyncio.all_tasks() if t is not current and not t.done()] == []
 
 
 async def test_shutdown_retires_the_open_question_and_leaves_no_task(

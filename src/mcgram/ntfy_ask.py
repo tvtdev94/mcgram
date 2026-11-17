@@ -21,6 +21,8 @@ import secrets
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+import anyio
+
 from .ask_registry import answered_text, stopped_text, timed_out_text
 from .errors import MCGramError
 from .ntfy_reply_listener import AUDIT_TOOL, ReplyListener
@@ -137,7 +139,8 @@ class NtfyAsk:
         finally:
             self._pending.pop(q_id, None)
             if not self._pending:
-                await self._listener.stop()
+                with _shielded():
+                    await self._listener.stop()
         text = answered_text(question, value) if source == "button" else timed_out_text(question)
         await self._retire(topic, posted_id, text)
         return {"value": value, "source": source, "question_id": q_id}
@@ -186,14 +189,12 @@ class NtfyAsk:
         """
         if posted_id is None:
             return
-        try:
-            await asyncio.wait_for(
-                self._client.publish(topic, text, priority=_MARKER_PRIORITY,
-                                     sequence_id=posted_id),
-                timeout=_RETIRE_TIMEOUT_S,
-            )
-        except Exception:
-            log.debug("retiring an ntfy question failed (non-fatal)", exc_info=True)
+        with _shielded():
+            try:
+                await self._client.publish(topic, text, priority=_MARKER_PRIORITY,
+                                           sequence_id=posted_id)
+            except Exception:
+                log.debug("retiring an ntfy question failed (non-fatal)", exc_info=True)
 
     def _on_message(self, event: dict[str, Any]) -> None:
         body = event.get("message")
@@ -226,3 +227,13 @@ class NtfyAsk:
         for pending in self._pending.values():
             if not pending.future.done():
                 pending.future.set_exception(NtfyAuthFailedError())
+
+
+def _shielded() -> anyio.CancelScope:
+    """A scope for cleanup that must run even while the call is being cancelled.
+
+    MCP cancels a call through an anyio cancel scope, which re-cancels every
+    later await inside it, so an unshielded cleanup request is abandoned. The
+    shield lets it finish; the deadline keeps shutdown bounded.
+    """
+    return anyio.CancelScope(shield=True, deadline=anyio.current_time() + _RETIRE_TIMEOUT_S)
