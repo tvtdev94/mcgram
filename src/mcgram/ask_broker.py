@@ -15,8 +15,8 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .lock import _pid_alive, _read_pid
-from .spool import Spool
+from .lock import _read_pid
+from .spool import Spool, heartbeat_status
 
 log = logging.getLogger("mcgram.ask_broker")
 
@@ -60,24 +60,8 @@ class AskBroker:
         hb = self._spool.read(HEARTBEAT_KEY, HEARTBEAT_KIND)
         if hb is None:
             return False, "no mcgram instance is running the ask broker"
-        if hb.get("protocol") != PROTOCOL_VERSION:
-            return False, (
-                f"the polling instance speaks broker protocol {hb.get('protocol')!r}, "
-                f"this one needs {PROTOCOL_VERSION} — upgrade both sessions"
-            )
-        at = hb.get("at")
-        if not isinstance(at, int | float) or isinstance(at, bool):
-            return False, "broker heartbeat is malformed"
-        age = time.time() - at
-        if age > self._heartbeat_stale_s:
-            return False, (
-                f"broker heartbeat is {age:.0f}s stale "
-                f"(owner pid={hb.get('pid')} may have died or lost connectivity)"
-            )
-        pid = hb.get("pid")
-        if not isinstance(pid, int) or not _pid_alive(pid):
-            return False, f"broker owner pid={pid} is no longer running"
-        return True, ""
+        return heartbeat_status(hb, protocol=PROTOCOL_VERSION,
+                                stale_s=self._heartbeat_stale_s, what="broker")
 
     def open_request(
         self,
