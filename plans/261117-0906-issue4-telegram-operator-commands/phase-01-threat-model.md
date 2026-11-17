@@ -1,7 +1,7 @@
 ---
 phase: 1
 title: "Threat model update"
-status: pending
+status: completed
 priority: P1
 dependencies: []
 effort: 1h

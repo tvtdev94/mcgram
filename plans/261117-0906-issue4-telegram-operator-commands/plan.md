@@ -1,11 +1,11 @@
 ---
 title: "Operator commands from Telegram (check_inbox)"
 description: "Let the operator send /commands to the bot; mcgram queues them as data in a per-config spool, and every Claude Code session reads its own through a check_inbox tool."
-status: pending
+status: completed
 priority: P2
 effort: 12h
 issue: 4
-branch: fix/reminder-wall-clock
+branch: feat/telegram-inbox
 tags: [feature, telegram, security, multi-session, mcp]
 blockedBy: []
 blocks: []
@@ -83,11 +83,11 @@ Operator ──/stop@api──▶ Telegram ──getUpdates──▶ poll_loop (
 
 | # | Phase | Effort | Depends on | Status |
 |---|---|---|---|---|
-| 1 | [Threat model update](phase-01-threat-model.md) | 1h | — | pending |
-| 2 | [Intake on the poll owner](phase-02-intake-owner.md) | 4h | 1 | pending |
-| 3 | [`check_inbox` tool](phase-03-check-inbox-tool.md) | 3h | 2 | pending |
-| 4 | [Cross-process e2e](phase-04-e2e-multi-session.md) | 2h | 3 | pending |
-| 5 | [Skill, README, architecture, CHANGELOG](phase-05-docs-skill.md) | 2h | 3 (parallel with 4) | pending |
+| 1 | [Threat model update](phase-01-threat-model.md) | 1h | — | completed |
+| 2 | [Intake on the poll owner](phase-02-intake-owner.md) | 4h | 1 | completed |
+| 3 | [`check_inbox` tool](phase-03-check-inbox-tool.md) | 3h | 2 | completed |
+| 4 | [Cross-process e2e](phase-04-e2e-multi-session.md) | 2h | 3 | completed |
+| 5 | [Skill, README, architecture, CHANGELOG](phase-05-docs-skill.md) | 2h | 3 (parallel with 4) | completed |
 
 Phases 4 and 5 can run in parallel because they touch disjoint files. Phases 1 through 3 run in
 order.
@@ -143,17 +143,45 @@ order.
   control and invisible characters from inbound text and labels the content as untrusted. Those are
   the sources of the `wait_s` cap and the text sanitizing here.
 
-## Open questions
+## Decisions (user-approved, 2026-11-17)
 
-The full list is in the final section of [phase-05](phase-05-docs-skill.md#open-questions). A
-summary:
+The user approved the plan, including the phase 1 threat-model section as proposed, and answered
+the open questions as follows:
 
-1. Should unaddressed commands go to every session (proposed), only the poll owner, or the first
-   reader?
-2. Is the addressing syntax `/cmd@label` acceptable, and is the default label (cwd basename) right?
-3. Should only `/commands` be accepted (proposed), or should plain text count as a note?
-4. Is `inbox.ttl_s` default 1800 s acceptable?
-5. Keep the 👀 read receipt? Should mcgram also tell the operator when a command expires unread?
-6. Should mcgram answer `/sessions` itself? (Proposed: no.)
-7. What command vocabulary should the skill define? (Proposed: `/status`, `/stop`, `/note`.)
-8. Should the stale `ask` without options line at `SKILL.md:25` be fixed in phase 5?
+1. **Routing.** An unaddressed command goes to every live session, so a bare `/stop` reaches all of
+   them.
+2. **Addressing.** `/cmd@label`. The default label is the working folder name; `MCGRAM_SESSION_LABEL`
+   overrides it.
+3. **What counts.** Only `/commands`. Plain text stays ignored (no implicit `/note`).
+4. **Expiry.** `inbox.ttl_s` defaults to 1800 s (allowed 60–86400 s), with a 60 s clock allowance
+   for "sent before this session started".
+5. **Read receipt.** Keep the 👀 reaction (best effort). mcgram posts **no** message when a command
+   expires unread.
+6. **`/sessions`.** mcgram does not answer it (non-goal).
+7. **Vocabulary.** `/status`, `/stop`, `/note` only. No `setMyCommands` registration.
+8. **`SKILL.md` "ask without options" row.** Fixed in a separate PR (#13); this plan does not touch
+   that line.
+
+## Implementation notes and deviations
+
+Implemented on `feat/telegram-inbox`. The line references above were written against another
+branch; the code follows the actual modules on `origin/main`. Small deviations, all stricter or
+equivalent:
+
+- `parse_update` also rejects (`rejected/malformed`) an update whose `update_id`, `message_id` or
+  `date` is not an integer, so a record can never carry an unusable id or time.
+- `publish` tells a failed write (`dropped/write_failed`, audited and logged) apart from a
+  duplicate, and a redelivery that arrives while the inbox is full is still a silent duplicate,
+  not `inbox_full`.
+- `unread` also rejects a genuine record stored under another update id than the one it was signed
+  for (audited `bad_signature`), so renaming a record cannot replay a command.
+- `spool.heartbeat_status` takes the heartbeat dict; each caller words the missing-heartbeat case
+  (broker unchanged; inbox: "no session is polling Telegram for commands").
+- `check_inbox` rejects any `wait_s` that is not a non-negative integer (bool, float, string) as
+  `invalid_input`. Read receipts run concurrently, each under the 5 s timeout, so a batch of 20
+  never blocks for 100 s.
+- The supervisor ticks every `broker.poll_interval_s`, so a demoted owner withdraws its heartbeat
+  within one tick.
+- Tests add a few cases beyond the plan's tables: the disabled inbox leaves no trace, a non-owner
+  never removes another pid's heartbeat, label normalization, the `wait_s` cap, the 20-command batch
+  with `more`, and two more forgery cases (another bot's key, a renamed record).
