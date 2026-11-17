@@ -272,6 +272,19 @@ async def test_no_tap_on_a_reachable_reply_topic_times_out(
     assert "timed out" in marker["message"]
 
 
+async def test_hanging_catch_up_read_cannot_hold_the_ask_past_its_bound(
+    asker: NtfyAsk, fake: FakeNtfy
+) -> None:
+    fake.poll_hangs = True
+    started = time.monotonic()
+    task = _ask(asker, timeout_s=0.3)
+    await fake.next_question()
+    out = await asyncio.wait_for(task, timeout=15)
+    assert (out["value"], out["source"]) == ("", "timeout")
+    assert fake.poll_since == [str(OPEN_TIME)]  # the read was made, then given up
+    assert time.monotonic() - started < 0.3 + 5 + 2
+
+
 async def test_auth_failure_on_the_subscription_fails_the_ask_at_once(
     asker: NtfyAsk, fake: FakeNtfy, audit: AuditLog
 ) -> None:

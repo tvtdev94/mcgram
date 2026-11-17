@@ -122,6 +122,11 @@ class NtfyAsk:
         `NtfyAskError` when the topics are unprotected, the reply topic cannot
         be reached, or ntfy refuses the subscription; client errors from the
         probe or the post propagate unchanged.
+
+        Beyond `timeout_s` the call is bounded by: two probes and the post
+        (each within the client's request timeout, normally well under a
+        second), up to 10 s for the subscription to open, up to 5 s for the
+        catch-up read, and up to 5 s for replacing the notification.
         """
         for checked in (topic, self._reply_topic):
             if not await self._client.anonymous_read_denied(checked):

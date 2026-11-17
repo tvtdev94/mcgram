@@ -169,7 +169,7 @@ Claude ─ask(q, options≤3)─▶ tools/ask.py ─ntfy─▶ tools/_ask_ntfy.p
 Phone tap ─POST (anonymous)─▶ <server>/<reply_topic>   (topic: everyone write-only)
 ReplyListener ◀─GET /<reply_topic>/json[?since=<cursor>] (Bearer token, read timeout 90s)─ ntfy
   message event → NtfyAsk._on_message → pending[q] → compare_digest(t, tokens[i]) → future
-  4. deadline: one catch-up GET ...?poll=1&since=<cursor>; then the outcome
+  4. deadline: one catch-up GET ...?poll=1&since=<cursor> (5 s budget); then the outcome
   5. outcome marker: POST <server>/ {topic, sequence_id:"q_ab12cd34", priority:2, message}
 ```
 
@@ -186,6 +186,10 @@ ReplyListener ◀─GET /<reply_topic>/json[?since=<cursor>] (Bearer token, read
   stream was down and the catch-up read failed, the result is
   `ntfy_reply_unreachable`, not `source: "timeout"`. A 401/403 on the stream
   fails every open ntfy ask at once with `ntfy_auth`.
+- **Time bound.** Beyond `timeout_s` an ask spends at most: two probes and the
+  post (each within the 30 s request timeout, normally well under a second),
+  10 s waiting for the subscription to open, 5 s on the catch-up read, and 5 s
+  replacing the notification.
 - **Shutdown.** `NtfyAsk.shutdown()` cancels open asks (each replaces its
   notification with the stopped marker, bounded to 5 s), then stops the listener.
 

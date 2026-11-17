@@ -28,6 +28,9 @@ log = logging.getLogger("mcgram.ntfy_reply")
 AUDIT_TOOL = "_ntfy_reply"
 _BACKOFF_INITIAL_S = 1.0
 _BACKOFF_MAX_S = 30.0
+#: The catch-up read runs after the ask's deadline, so it gets its own short
+#: budget rather than the client's 30 s request timeout.
+_CATCH_UP_TIMEOUT_S = 5.0
 # Before an `open` with a usable `time` arrives there is no server-side cursor;
 # replaying the whole cache is safe because ids and tokens are random.
 _SINCE_ALL = "all"
@@ -80,8 +83,10 @@ class ReplyListener:
     async def catch_up(self) -> bool:
         """Read what the reply topic cached since the cursor. False if that failed."""
         try:
-            events = await self._client.poll(self._topic, since=self._cursor or _SINCE_ALL)
-        except (TransportError, NtfyError, AuthError) as e:
+            async with asyncio.timeout(_CATCH_UP_TIMEOUT_S):
+                events = await self._client.poll(
+                    self._topic, since=self._cursor or _SINCE_ALL)
+        except (TransportError, NtfyError, AuthError, TimeoutError) as e:
             log.debug("ntfy reply catch-up failed: %s", e)
             return False
         for event in events:
