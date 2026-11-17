@@ -12,7 +12,7 @@ import base64
 import json
 import logging
 import mimetypes
-from collections.abc import AsyncIterator, Iterable
+from collections.abc import AsyncGenerator, Iterable
 from pathlib import Path
 from typing import Any
 
@@ -225,7 +225,9 @@ class NtfyClient:
             headers={"Content-Type": "application/json"},
         )
 
-    async def stream(self, topic: str, *, since: str | None) -> AsyncIterator[dict[str, Any]]:
+    async def stream(
+        self, topic: str, *, since: str | None
+    ) -> AsyncGenerator[dict[str, Any], None]:
         """Subscribe to `topic` and yield each event (`open`, `message`, ...).
 
         Runs until the server closes the connection or an error ends it:

@@ -37,6 +37,20 @@ class PendingAsk:
     client: Any = None  # for re-drawing the keyboard as options toggle
 
 
+def answered_text(question: str, value: str | list[str]) -> str:
+    """The question, rewritten to record the choice once it is answered."""
+    shown = (", ".join(value) or "—") if isinstance(value, list) else value
+    return f"{question}\n\n✅ Đã chọn: {shown}"
+
+
+def timed_out_text(question: str) -> str:
+    return f"{question}\n\n⏱ timed out"
+
+
+def stopped_text(question: str) -> str:
+    return f"{question}\n\n⏹ mcgram stopped before an answer"
+
+
 def _build_keyboard(
     question_id: str,
     options: list[str],
@@ -216,11 +230,8 @@ async def _mark_answered(
     Without this the inline keyboard just vanishes on reply, leaving no trace in
     chat history of what was picked. Append the choice, then drop the buttons.
     """
-    shown = (", ".join(value) or "—") if isinstance(value, list) else value
     try:
-        await client.edit_message_text(
-            chat_id, message_id, f"{question}\n\n✅ Đã chọn: {shown}"
-        )
+        await client.edit_message_text(chat_id, message_id, answered_text(question, value))
     except Exception:
         log.debug("edit_message_text on answer failed (non-fatal)", exc_info=True)
     await _strip_keyboard(client, chat_id, message_id)
@@ -241,7 +252,7 @@ async def _mark_timed_out(
 ) -> None:
     """Say so in the chat and drop the buttons, so nobody taps a dead question."""
     try:
-        await client.edit_message_text(chat_id, message_id, f"{question}\n\n⏱ timed out")
+        await client.edit_message_text(chat_id, message_id, timed_out_text(question))
     except Exception:
         log.debug("edit_message_text on timeout failed (non-fatal)", exc_info=True)
     await _strip_keyboard(client, chat_id, message_id)
@@ -258,8 +269,7 @@ async def _mark_abandoned(
     async def retire() -> None:
         with contextlib.suppress(Exception):
             await client.edit_message_text(
-                chat_id, message_id, f"{question}\n\n⏹ mcgram stopped before an answer",
-                retry_flood_wait=False,
+                chat_id, message_id, stopped_text(question), retry_flood_wait=False,
             )
         await _strip_keyboard(client, chat_id, message_id, retry_flood_wait=False)
 

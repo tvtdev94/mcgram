@@ -1,7 +1,7 @@
 ---
 phase: 3
 title: "ntfy ask core: registry and reply listener"
-status: pending
+status: done
 priority: P1
 dependencies: [2]
 effort: 5h
