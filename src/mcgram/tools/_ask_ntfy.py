@@ -13,6 +13,7 @@ from typing import Any
 from ..config import Destination
 from ..errors import AuthError, NtfyError, RateLimitError, TransportError
 from ..ntfy_ask import (
+    MAX_MESSAGE_BYTES,
     MAX_OPTIONS,
     NtfyAsk,
     NtfyAskError,
@@ -24,8 +25,6 @@ from ..ntfy_ask import (
 from ..runtime import AppState
 
 TOOL_NAME = "ask"
-#: Past this size ntfy turns the message into an attachment.
-MAX_QUESTION_BYTES = 4096
 _NOT_POSTED = "question was NOT posted"
 _SETUP = "see the ntfy section of docs/security-threat-model.md"
 
@@ -57,9 +56,9 @@ async def ask_ntfy(
     if len(options) > max_options:
         return refuse("invalid_input", reason="too_many_options", max=max_options,
                       hint="ntfy allows at most three buttons per notification")
-    if len(question.encode("utf-8")) > MAX_QUESTION_BYTES:
+    if len(question.encode("utf-8")) > MAX_MESSAGE_BYTES:
         return refuse("invalid_input", reason="question_too_long",
-                      max_bytes=MAX_QUESTION_BYTES)
+                      max_bytes=MAX_MESSAGE_BYTES)
     if state.ntfy_client is None or not state.ntfy_client.has_token:
         return refuse("ntfy_ask_requires_token",
                       reason="ask over ntfy needs the access token, and it is not set",

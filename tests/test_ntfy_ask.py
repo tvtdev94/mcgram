@@ -106,6 +106,22 @@ async def test_tap_resolves_with_its_label_and_the_button_carries_no_credential(
     assert TOKEN not in _audit_text(audit)
 
 
+async def test_outcome_of_a_maximum_size_question_stays_within_ntfy_message_limit(
+    asker: NtfyAsk, fake: FakeNtfy
+) -> None:
+    # Past 4096 bytes ntfy turns a message into an attachment, so an outcome
+    # that quoted the whole question would not replace the notification.
+    question = "é" * 2048  # exactly 4096 UTF-8 bytes
+    task = asyncio.create_task(asker.open(QUESTION_TOPIC, question, OPTIONS, 10))
+    _, posted = await fake.next_question()
+    fake.broadcast(_body(posted, 1))
+    await task
+    _, marker = fake.published[-1]
+    assert len(marker["message"].encode("utf-8")) <= 4096
+    assert marker["message"].startswith("éé")
+    assert marker["message"].endswith("Staging")
+
+
 @pytest.mark.parametrize(
     ("forge", "audited"),
     [

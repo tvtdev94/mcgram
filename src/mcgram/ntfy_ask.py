@@ -18,6 +18,7 @@ import asyncio
 import json
 import logging
 import secrets
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -36,6 +37,8 @@ log = logging.getLogger("mcgram.ntfy_ask")
 
 #: ntfy allows at most three actions per notification.
 MAX_OPTIONS = 3
+#: Past this many bytes ntfy turns a message into an attachment.
+MAX_MESSAGE_BYTES = 4096
 #: Upper bound on waiting for the subscription to open before posting.
 _READY_TIMEOUT_S = 10.0
 #: Upper bound on retiring a question's notification, and on shutdown.
@@ -153,19 +156,20 @@ class NtfyAsk:
         except asyncio.CancelledError:
             # Shutdown: nobody will hear a tap on this question any more.
             if attempted:
-                await self._retire(topic, q_id, stopped_text(question))
+                await self._retire(topic, q_id, _outcome(question, stopped_text))
             raise
         except NtfyAskError as e:
             e.posted = posted
             if attempted:
-                await self._retire(topic, q_id, stopped_text(question))
+                await self._retire(topic, q_id, _outcome(question, stopped_text))
             raise
         finally:
             self._pending.pop(q_id, None)
             if not self._pending:
                 with _shielded():
                     await self._listener.stop()
-        text = answered_text(question, value) if source == "button" else timed_out_text(question)
+        text = (_outcome(question, lambda q: answered_text(q, value)) if source == "button"
+                else _outcome(question, timed_out_text))
         await self._retire(topic, q_id, text)
         return {"value": value, "source": source, "question_id": q_id}
 
@@ -249,6 +253,22 @@ class NtfyAsk:
         for pending in self._pending.values():
             if not pending.future.done():
                 pending.future.set_exception(NtfyAuthFailedError())
+
+
+def _outcome(question: str, render: Callable[[str], str]) -> str:
+    """`render(question)`, shortening the quoted question so the whole message
+    fits in one ntfy message and can replace the notification."""
+    text = render(question)
+    if len(text.encode("utf-8")) <= MAX_MESSAGE_BYTES:
+        return text
+    budget = MAX_MESSAGE_BYTES - len(render("").encode("utf-8")) - len("…".encode())
+    if budget <= 0:  # the outcome alone is too long (a huge label)
+        return _clip(text, MAX_MESSAGE_BYTES)
+    return render(_clip(question, budget) + "…")
+
+
+def _clip(text: str, max_bytes: int) -> str:
+    return text.encode("utf-8")[:max_bytes].decode("utf-8", "ignore")
 
 
 def _shielded() -> anyio.CancelScope:
