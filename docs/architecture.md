@@ -237,18 +237,25 @@ command.
 Intake (`inbox.make_intake`, registered once on the dispatcher, so it runs only while this process
 polls): after the poll loop's `chat.id` filter, an update must be a new (not edited) message in a
 `private` chat, from `from.id == operator_chat_id`, not a bot, not `via_bot`, not forwarded, with
-`text` matching `/name[@label] [args]`. `/start` is ignored, and args over 1000 characters are
-dropped. Every refusal is audited as `{tool:"_inbox", status, reason}`; button taps pass silently.
-An accepted command takes a token from its own bucket, is dropped when its Telegram `date` is older
-than `inbox.ttl_s` or 50 records are pending, and is otherwise written once per `update_id`, so a
-new owner that starts at `offset=0` does not store it twice. The record is signed with
+`text` matching `/name[@label] [args]`. `/start` is ignored. Only `/status`, `/stop` and `/note`
+are kept (`unknown_command` otherwise); args that start with `@label` when no target is attached
+are dropped (`ambiguous_target`), and so are args over 1000 characters. Every refusal is audited as
+`{tool:"_inbox", status, reason}`; button taps pass silently. An accepted command takes a token
+from its own bucket, is dropped when its Telegram `date` is older than `inbox.ttl_s` or 50 signed,
+unexpired records are pending, and is otherwise written once per `update_id`, so a new owner that
+starts at `offset=0` does not store it twice (audited `ignored/duplicate`). A file already under
+that name that is not a genuine record is replaced. Every `dropped` outcome puts a 👎 reaction on
+the operator's message from a background task (own rate bucket), so the poll loop never waits. The record is signed with
 HMAC-SHA256 under a key derived from the bot token, and expires `inbox.ttl_s` after the later of
 its Telegram `date` and its receipt, so a clock behind Telegram's cannot reopen the dedupe window.
-Intake does local file I/O only, never a network call, so it cannot stall `getUpdates`.
+Apart from that background reaction, intake does local file I/O only, so it cannot stall
+`getUpdates`.
 
 Supervisor (`inbox_wiring.supervise`, every session): beats the heartbeat while
 `state.owns_polling` is true and withdraws its own heartbeat on demotion and shutdown; sweeps
-expired records every `sweep_interval_s`. The heartbeat follows poll-lock ownership, not the health
+expired records, and records claiming an expiry beyond the largest `ttl_s`, every
+`sweep_interval_s`. With the inbox off, `start_inbox` still sweeps an existing `inbox/` directory
+once at startup and creates nothing. The heartbeat follows poll-lock ownership, not the health
 of `getUpdates`: an owner stuck in 409 backoff or offline still reads as `receiving: true`, as
 with the broker heartbeat.
 
@@ -259,7 +266,9 @@ directory listing came back empty, so a failed listing cannot replay commands. A
 read only after its audit record is written. It returns verified records, oldest first and at most 20 per call, that
 are unseen, for its label or unaddressed, sent no earlier than 60 s before the session started, and
 not expired. A record whose signature fails, or that sits under another update id than the one it
-was signed for, is audited `bad_signature` once and never returned. With `wait_s > 0` it polls every
+was signed for, is audited `bad_signature` once per content and never returned; it is tracked
+apart from the read map, so the genuine command that intake later writes under that name is still
+read. With `wait_s > 0` it polls every
 `broker.poll_interval_s` up to `wait_s` (capped at `limits.ask_timeout_max_s`), but returns at once
 with `receiving: false` when the heartbeat is missing, stale, from another protocol, or from a dead
 pid. Each returned command gets a 👀 `setMessageReaction` from the reading session, best effort

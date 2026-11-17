@@ -304,19 +304,31 @@ works. Type a command to the bot in your private chat:
 /stop@api            only the session labelled "api"
 ```
 
-- **Only `/commands` count.** Plain text, edited messages, forwards, captions, `/start`, and
-  anything from a group, another user, or a bot is ignored and audited. Typed text still never
-  answers an `ask`.
+- **Only these three commands count.** Any other `/command` is refused, and so are plain text,
+  edited messages, forwards, captions, `/start`, and anything from a group, another user, or a bot.
+  Each refusal is audited. Typed text still never answers an `ask`.
 - **Every session reads them**, not only the one polling Telegram: the polling session stores each
   command in `~/.mcgram/spool/<config-id>/inbox/`, and Claude reads it with the `check_inbox` tool.
   An unaddressed command reaches every session; each session reads it once.
-- **Address one session** with `/cmd@label`. The label is the session's working folder name,
-  lowercased (`[a-z0-9_]`, at most 32 characters). Set `MCGRAM_SESSION_LABEL` in the MCP server's
-  env to choose your own. `check_inbox` returns it as `label`.
-- **👀 means read.** The bot reacts 👀 on your message when a session has read it. A command nobody
-  reads expires after `inbox.ttl_s` (30 min) without a message. A session never sees a command
-  sent more than 60 s before it started (a clock allowance), so a new session does not obey an
-  old `/stop`.
+- **Address one session** with `/cmd@label`, with no space before the `@`. `/stop @api` is
+  refused, not sent to every session. The label is the session's working folder name, lowercased,
+  with anything outside `[a-z0-9_]` turned into `_` (at most 32 characters). So the folder
+  `my-project` is `/stop@my_project`, and `/stop@my-project` is not a command at all. Set
+  `MCGRAM_SESSION_LABEL` in the MCP server's env to choose your own. `check_inbox` returns it as
+  `label`.
+- **Labels can clash.** Two sessions in the same folder, or in folders with the same name, share a
+  label, and `/stop@label` reaches both. Nothing warns about it; set `MCGRAM_SESSION_LABEL` to
+  tell them apart. `/stop@YourBot` (Telegram's autocomplete can add the bot's name) reaches no
+  session, unless one is labelled that.
+- **👀 means read, 👎 means dropped.** The bot reacts 👀 on your message when a session has read
+  it, and 👎 when it could not take the command: unknown, ambiguous target, too long, too old,
+  too many pending, or rate limited (see `mcgram audit --tool _inbox`). A command nobody reads
+  expires after `inbox.ttl_s` (30 min) without a message.
+- **Keep the clock in sync (NTP).** A session never sees a command sent more than 60 s before it
+  started, so a new session does not obey an old `/stop`. That check compares Telegram's time with
+  your machine's. With a clock more than a minute fast, a session misses commands sent right after
+  it starts; with one more than a minute slow, a new session can still see a `/stop` sent shortly
+  before it started.
 - **mcgram never executes a command.** It only filters, stores, expires, and audits. Claude decides
   what to do, and the bundled skill tells it that a command is a request, never an approval: a risky
   action still needs an `ask` tap.
