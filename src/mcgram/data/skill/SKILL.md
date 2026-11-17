@@ -29,17 +29,24 @@ Use this skill when the user says: "báo telegram khi xong", "tell me on Telegra
 
 ## Transport awareness (Telegram vs ntfy.sh vs Discord)
 
-The user may configure **Telegram**, **ntfy.sh**, **Discord**, or any mix. Each channel declares its transport. Most tools work on all three, but `ask` is **Telegram-only** (ntfy.sh and Discord have no 2-way input).
+The user may configure **Telegram**, **ntfy.sh**, **Discord**, or any mix. Each channel declares its transport. Most tools work on all three, but `ask` needs **Telegram**, or an ntfy channel where the user turned on ntfy ask (`ntfy.ask.enabled`). Discord has no 2-way input.
 
 | Tool | Telegram | ntfy.sh | Discord |
 |---|---|---|---|
 | `send_message`, `send_file`, `send_video` | ✅ | ✅ | ✅ |
 | `edit_message` | ✅ | ❌ `transport_unsupported` | ✅ |
 | `set_reminder`, `cancel_reminder`, `list_reminders` | ✅ | ✅ | ✅ |
-| `ask` | ✅ (polling session; other sessions only with the broker on) | ❌ `transport_unsupported` | ❌ `transport_unsupported` |
+| `ask` | ✅ (polling session; other sessions only with the broker on) | ✅ if the user enabled ntfy ask (≤3 options, no `multi_select`; every session), else ❌ `transport_unsupported` | ❌ `transport_unsupported` |
 
 If `ask` returns `error: "transport_unsupported"`, **do not retry**. Tell the user:
 "This channel is one-way (ntfy.sh / Discord) and doesn't support 2-way input. I'll send a notification instead and proceed with a safe default — or switch to a telegram channel if you want me to wait for your reply."
+
+With ntfy ask on, these `ask` errors are setup or network problems. **Do not retry**; tell the user what to fix. The `hint` says whether the question was posted.
+- `ntfy_topic_not_protected` → the `topic` in the response can be read without credentials. The question topic must deny anonymous read, and the reply topic must be write-only for everyone.
+- `ntfy_ask_requires_token` → the ntfy access token env var is not set.
+- `ntfy_ask_requires_https` → `ntfy.server` must be an `https://` URL.
+- `ntfy_reply_unreachable` → mcgram could not listen for the answer (network or ntfy down). This is not "the user ignored you"; don't treat it as a timeout.
+- `ntfy_auth` → ntfy refused the access token.
 
 Each tool response includes a `transport` field (`"telegram"`, `"ntfy"`, or `"discord"`) so you know what got used.
 
@@ -163,7 +170,7 @@ mcgram discord mention list                                  # list registered m
 - `send_message` text cap: **4096 chars** on Telegram/ntfy, **2000 chars** on Discord. Over the cap the text is sent as a `message.txt` attachment; only text over the file size cap returns `text_too_long`.
 - Caption max 1024 chars (Telegram limit) — auto-truncated with ellipsis.
 - Max **10 pending reminders**. Max delay **24h**. Reminders are saved to disk and **survive a restart**: one that came due while mcgram was down fires on the next start, marked late (dropped if more than 24h overdue). Rarely a crash can deliver one twice.
-- `ask` **requires `options`** (1–6 buttons); typed replies are not accepted. For an open-ended question, offer the likely answers as buttons. `columns` (1–4) puts several buttons on a row; `multi_select=true` lets the user tick several options and press Done.
+- `ask` **requires `options`** (1–6 buttons, at most 3 on ntfy); typed replies are not accepted. For an open-ended question, offer the likely answers as buttons. `columns` (1–4) puts several buttons on a row; `multi_select=true` lets the user tick several options and press Done.
 - Rate limit: 20 calls per minute per tool.
 
 ## Error recovery

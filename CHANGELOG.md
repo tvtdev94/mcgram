@@ -7,6 +7,17 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **`ask` over ntfy (opt-in).** With `ntfy.ask.enabled: true`, `ask` on an
+  ntfy channel posts up to three action buttons. A tap posts to a reply topic
+  that mcgram subscribes to while the question is open. It requires an access
+  token, an `https://` server, a question topic nobody can read anonymously,
+  and a reply topic anyone can post to but only you can read. mcgram checks the
+  two topics before every ask, and `mcgram doctor` checks the whole setup.
+  There is no `multi_select` on ntfy. It works in every session without the
+  broker. **Off by default**: read the ntfy section of
+  `docs/security-threat-model.md` first.
+
 ### Changed
 - `mcgram doctor` no longer sends anything by default. It still checks the
   token, `getMe`, ntfy health and every Discord webhook, and reports each send

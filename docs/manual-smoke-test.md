@@ -73,6 +73,35 @@ mcgram doctor
 - [ ] "Send a file to eve into thread <bad_thread_id>" (use invalid ID) → rejected with `DiscordError`, audit shows clear error (code 10003)
 - [ ] `ask` tool with Discord channel → returns `transport_unsupported` (Discord is one-way only)
 
+## ask over ntfy (optional, manual only)
+
+Not run in CI. The unit tests mock ntfy, so this is the only check of what the
+mocks assume. Needs a self-hosted ntfy with auth (Docker) and a real phone.
+
+```bash
+docker run -p 8080:80 -e NTFY_AUTH_DEFAULT_ACCESS=deny-all \
+  -e NTFY_AUTH_FILE=/var/lib/ntfy/user.db binwiederhier/ntfy serve
+docker exec -it <container> ntfy user add me
+docker exec -it <container> ntfy access me mcgram-q-<random> rw
+docker exec -it <container> ntfy access me mcgram-r-<random> rw
+docker exec -it <container> ntfy access everyone mcgram-r-<random> write-only
+docker exec -it <container> ntfy token add me    # NTFY_TOKEN=... into ~/.mcgram/.env
+```
+
+`ask` requires https, so put the server behind a TLS proxy (or a tunnel), set
+`ntfy.server` to that URL, and set `ntfy.ask.enabled: true` with the reply
+topic. Subscribe to the question topic in the phone app, logged in as `me`.
+
+- [ ] `mcgram doctor` → token, https and both topics `[OK]`; `mcgram doctor --send` → the anonymous reply-topic publish is `[OK]`
+- [ ] `curl -s "<server>/mcgram-q-<random>/json?poll=1&since=none"` (no token) answers 401 or 403; note which
+- [ ] `curl -sN -H "Authorization: Bearer $NTFY_TOKEN" "<server>/mcgram-r-<random>/json"` prints an `open` event that carries `time`
+- [ ] "Ask me on ntfy whether to deploy, options Yes/No" → the notification shows two buttons; tap one → Claude receives that label
+- [ ] With the curl subscription above still open, the tap arrives as a `message` whose `message` is exactly `{"q":"q_…","t":"…"}`
+- [ ] After the answer the notification is replaced by the `✅` outcome (server 2.16.0+, Android 1.22.2+), not added as a second one
+- [ ] Ask again, turn on airplane mode, tap, turn it off before the deadline → the answer still arrives
+- [ ] Make the question topic anonymously readable (`ntfy access everyone mcgram-q-<random> ro`) → `ask` returns `ntfy_topic_not_protected` and nothing arrives on the phone
+- [ ] Android: the tap clears the notification. iOS: note whether the tapped notification stays (`clear` ignored) until the outcome replaces it ([ntfy#1728](https://github.com/binwiederhier/ntfy/issues/1728))
+
 ## Edge cases
 
 - [ ] Send a file `>50 MB` → rejected with `file_too_large`
