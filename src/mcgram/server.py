@@ -63,6 +63,10 @@ async def _serve(state: AppState) -> None:
         # transfer at runtime, and a shrinking tool list would confuse clients.
         from .tools import ask, cancel_reminder, list_reminders, set_reminder
         modules += [ask, set_reminder, cancel_reminder, list_reminders]
+    if state.settings.inbox.enabled:
+        # Listed even when the inbox can't work here, so Claude gets the reason.
+        from .tools import check_inbox
+        modules.append(check_inbox)
     schemas = [Tool(**m.schema()) for m in modules]
     handlers = {m.TOOL_NAME: m.handle for m in modules}
 

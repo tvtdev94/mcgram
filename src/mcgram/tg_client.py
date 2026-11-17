@@ -251,6 +251,21 @@ class TelegramClient:
                          retry_flood_wait=False)
         return True
 
+    async def set_message_reaction(
+        self, chat_id: int, message_id: int, emoji: str, *, retry_flood_wait: bool = False
+    ) -> bool:
+        """Put one emoji reaction on a message (replaces the bot's earlier one).
+
+        No flood-wait retry by default: callers use it as a best-effort receipt.
+        """
+        data = {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "reaction": json.dumps([{"type": "emoji", "emoji": emoji}]),
+        }
+        await self._call("setMessageReaction", data=data, retry_flood_wait=retry_flood_wait)
+        return True
+
     async def edit_message_reply_markup(
         self,
         chat_id: int,
