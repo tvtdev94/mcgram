@@ -41,8 +41,11 @@ def test_missing_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     assert "FAIL" in capsys.readouterr().out
 
 
-def test_happy_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-                    capsys: pytest.CaptureFixture[str], httpx_mock) -> None:
+def test_happy_path_sends_nothing_by_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str], httpx_mock,
+) -> None:
+    # Only getMe is mocked: a sendMessage would find no response and fail the run.
     cfg = tmp_path / "config.yaml"
     _write_config(cfg, tmp_path / "audit.jsonl")
     monkeypatch.setenv("MCGRAM_CONFIG", str(cfg))
@@ -51,14 +54,11 @@ def test_happy_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
         url="https://api.telegram.org/botfake:abcd1234/getMe",
         json={"ok": True, "result": {"id": 1, "username": "test_bot"}},
     )
-    httpx_mock.add_response(
-        url="https://api.telegram.org/botfake:abcd1234/sendMessage",
-        json={"ok": True, "result": {"message_id": 99}},
-    )
     rc = doctor()
     assert rc == 0
     out = capsys.readouterr().out
     assert "test_bot" in out
+    assert "[SKIP] telegram send test" in out
     assert "PASS" in out
 
 
@@ -120,10 +120,6 @@ def test_unusable_spool_fails_doctor(tmp_path: Path, monkeypatch: pytest.MonkeyP
     httpx_mock.add_response(
         url="https://api.telegram.org/botfake:abcd1234/getMe",
         json={"ok": True, "result": {"id": 1, "username": "test_bot"}},
-    )
-    httpx_mock.add_response(
-        url="https://api.telegram.org/botfake:abcd1234/sendMessage",
-        json={"ok": True, "result": {"message_id": 99}},
     )
     rc = doctor()
     assert rc == 1

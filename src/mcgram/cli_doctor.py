@@ -29,11 +29,14 @@ def _fail(label: str, detail: str = "") -> str:
     return f"[FAIL] {label}" + (f"  {detail}" if detail else "")
 
 
+_NO_SEND = "not sent — run `mcgram doctor --send` to deliver a test message"
+
+
 def _skip(label: str, detail: str = "") -> str:
     return f"[SKIP] {label}" + (f"  {detail}" if detail else "")
 
 
-async def _check_telegram(settings: Settings, rows: list[str]) -> int:
+async def _check_telegram(settings: Settings, rows: list[str], send: bool) -> int:
     assert settings.bot is not None
     failures = 0
     try:
@@ -67,6 +70,9 @@ async def _check_telegram(settings: Settings, rows: list[str]) -> int:
                 return 1
             chat_id = settings.bot.operator_chat_id
             rows.append(_ok("telegram operator_chat_id", str(chat_id)))
+            if not send:
+                rows.append(_skip("telegram send test", _NO_SEND))
+                return failures
             try:
                 msg = await c.send_message(chat_id, "mcgram doctor: telegram OK")
                 rows.append(_ok(
@@ -87,7 +93,7 @@ async def _check_telegram(settings: Settings, rows: list[str]) -> int:
     return failures
 
 
-async def _check_ntfy(settings: Settings, rows: list[str]) -> int:
+async def _check_ntfy(settings: Settings, rows: list[str], send: bool) -> int:
     assert settings.ntfy is not None
     failures = 0
     if not settings.ntfy.default_topic:
@@ -110,6 +116,9 @@ async def _check_ntfy(settings: Settings, rows: list[str]) -> int:
                 rows.append(_fail("ntfy health",
                                   f"non-200 from {settings.ntfy.server}"))
                 failures += 1
+            if not send:
+                rows.append(_skip("ntfy send test", _NO_SEND))
+                return failures
             try:
                 await nc.send_message(
                     settings.ntfy.default_topic,
@@ -137,8 +146,9 @@ async def _check_ntfy(settings: Settings, rows: list[str]) -> int:
     return failures
 
 
-async def _check_discord(settings: Settings, rows: list[str]) -> int:
-    """Verify every Discord channel: env var set, webhook live, test message sent.
+async def _check_discord(settings: Settings, rows: list[str], send: bool) -> int:
+    """Verify every Discord channel: env var set, webhook live, and with `send` a
+    test message delivered.
 
     Prints channel name + channel_id only — never the webhook URL or token."""
     discord = {
@@ -180,6 +190,9 @@ async def _check_discord(settings: Settings, rows: list[str]) -> int:
                 f"discord {name}",
                 f"channel {meta.get('channel_id')} ({meta.get('name')})",
             ))
+            if not send:
+                rows.append(_skip(f"discord {name} send test", _NO_SEND))
+                continue
             try:
                 sent = await dc.send_message(
                     url, f"mcgram doctor: discord OK — {name}",
@@ -201,19 +214,19 @@ async def _check_discord(settings: Settings, rows: list[str]) -> int:
     return failures
 
 
-async def _run_checks(settings: Settings) -> tuple[int, list[str]]:
+async def _run_checks(settings: Settings, send: bool) -> tuple[int, list[str]]:
     rows: list[str] = []
     failures = 0
     if settings.bot is not None:
-        failures += await _check_telegram(settings, rows)
+        failures += await _check_telegram(settings, rows, send)
     else:
         rows.append(_skip("telegram", "no `bot` section in config"))
     if settings.ntfy is not None:
-        failures += await _check_ntfy(settings, rows)
+        failures += await _check_ntfy(settings, rows, send)
     else:
         rows.append(_skip("ntfy", "no `ntfy` section in config"))
     if any(ch.transport == "discord" for ch in settings.channels.values()):
-        failures += await _check_discord(settings, rows)
+        failures += await _check_discord(settings, rows, send)
     failures += _check_spool(settings, rows)
     return failures, rows
 
@@ -241,8 +254,12 @@ def _resolve_config_path() -> Path:
     return Path(env).expanduser() if env else Path("~/.mcgram/config.yaml").expanduser()
 
 
-def doctor() -> int:
-    """Run all checks and print a summary. Exit 0 if all OK, 1 otherwise."""
+def doctor(*, send: bool = False) -> int:
+    """Run all checks and print a summary. Exit 0 if all OK, 1 otherwise.
+
+    Checks are read-only by default; `send` also delivers one test message to
+    every configured transport and channel.
+    """
     cfg_path = _resolve_config_path()
     print(f"config:  {cfg_path}")
     if not cfg_path.is_file():
@@ -258,7 +275,7 @@ def doctor() -> int:
         print(_fail("config loaded", str(e)))
         return 1
 
-    failures, rows = asyncio.run(_run_checks(settings))
+    failures, rows = asyncio.run(_run_checks(settings, send))
     print()
     for row in rows:
         print(row)
