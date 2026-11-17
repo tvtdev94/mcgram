@@ -292,7 +292,8 @@ ntfy:
   ntfy access everyone mcgram-r-<random> write-only
   ```
 
-`mcgram doctor` checks the token, https and both topics' access (reads only);
+`mcgram doctor` checks the token, https, both topics' anonymous access and that
+the token can read the reply topic (reads only);
 `mcgram doctor --send` also posts one anonymous probe to the reply topic.
 
 On ntfy, `ask` takes at most 3 options (ntfy's action limit), has no

@@ -92,7 +92,7 @@ docker exec -it <container> ntfy token add me    # NTFY_TOKEN=... into ~/.mcgram
 `ntfy.server` to that URL, and set `ntfy.ask.enabled: true` with the reply
 topic. Subscribe to the question topic in the phone app, logged in as `me`.
 
-- [ ] `mcgram doctor` → token, https and both topics `[OK]`; `mcgram doctor --send` → the anonymous reply-topic publish is `[OK]`
+- [ ] `mcgram doctor` → token, https, both topics and the token's reply-topic read `[OK]`; `mcgram doctor --send` → the anonymous reply-topic publish is `[OK]`
 - [ ] `curl -s "<server>/mcgram-q-<random>/json?poll=1&since=none"` (no token) answers 401 or 403; note which
 - [ ] `curl -sN -H "Authorization: Bearer $NTFY_TOKEN" "<server>/mcgram-r-<random>/json"` prints an `open` event that carries `time`
 - [ ] "Ask me on ntfy whether to deploy, options Yes/No" → the notification shows two buttons; tap one → Claude receives that label

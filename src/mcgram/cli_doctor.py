@@ -158,8 +158,9 @@ async def _check_ntfy(settings: Settings, rows: list[str], send: bool) -> int:
 async def _check_ntfy_ask(
     settings: Settings, nc: NtfyClient, rows: list[str], send: bool
 ) -> int:
-    """What `ask` over ntfy enforces, checked up front: token, https, and the
-    two topics' access levels. The probes are reads, so they run without `send`."""
+    """What `ask` over ntfy enforces, checked up front: token, https, the two
+    topics' anonymous access, and that the token can read the reply topic. All
+    of these are reads, so they run without `send`."""
     assert settings.ntfy is not None
     ntfy = settings.ntfy
     reply_topic = ntfy.ask.reply_topic
@@ -194,6 +195,20 @@ async def _check_ntfy_ask(
             rows.append(_ok(label, f"topic={topic}"))
         else:
             rows.append(_fail(label, f"topic={topic} is readable anonymously — {fix}"))
+            failures += 1
+    if nc.has_token:
+        # mcgram listens for taps as the token's user; without read access the
+        # first ask fails with ntfy_auth.
+        label = "ntfy ask token reads reply topic"
+        try:
+            await nc.poll(reply_topic, since="none")
+            rows.append(_ok(label, f"topic={reply_topic}"))
+        except AuthError:
+            rows.append(_fail(label, f"topic={reply_topic}: the token's user may not read "
+                                     "it — give that user read access to the reply topic"))
+            failures += 1
+        except (NtfyError, TransportError) as e:
+            rows.append(_fail(label, f"topic={reply_topic}: {e}"))
             failures += 1
     label = "ntfy ask reply topic accepts anonymous publish"
     if not send:
