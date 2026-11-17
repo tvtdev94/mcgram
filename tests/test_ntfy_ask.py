@@ -81,7 +81,7 @@ async def test_tap_resolves_with_its_label_and_the_button_carries_no_credential(
     asker: NtfyAsk, fake: FakeNtfy, audit: AuditLog
 ) -> None:
     task = _ask(asker)
-    q_msg_id, question = await fake.next_question()
+    _, question = await fake.next_question()
     fake.broadcast(_body(question, 1))
     out = await task
 
@@ -96,9 +96,10 @@ async def test_tap_resolves_with_its_label_and_the_button_carries_no_credential(
     assert {b["q"] for b in bodies} == {out["question_id"]}
     assert len({b["t"] for b in bodies}) == len(OPTIONS)
     assert TOKEN not in json.dumps(question)
+    assert question["sequence_id"] == out["question_id"]
     # The question is replaced in place: same sequence id, no buttons, silent.
     _, marker = fake.published[-1]
-    assert marker["sequence_id"] == q_msg_id
+    assert marker["sequence_id"] == question["sequence_id"]
     assert marker["priority"] == 2
     assert "actions" not in marker
     assert "Staging" in marker["message"]
@@ -231,14 +232,14 @@ async def test_unreachable_reply_topic_at_the_deadline_is_not_a_timeout(
     asker: NtfyAsk, fake: FakeNtfy
 ) -> None:
     task = _ask(asker, timeout_s=1)
-    q_msg_id, _ = await fake.next_question()
+    _, question = await fake.next_question()
     fake.streams[0].fail()
     fake.on_poll = lambda: 503
     with pytest.raises(NtfyReplyUnreachableError) as exc:
         await task
     assert exc.value.posted is True
     _, marker = fake.published[-1]
-    assert marker["sequence_id"] == q_msg_id
+    assert marker["sequence_id"] == question["sequence_id"]
     assert "stopped" in marker["message"]
 
 
@@ -246,12 +247,12 @@ async def test_no_tap_on_a_reachable_reply_topic_times_out(
     asker: NtfyAsk, fake: FakeNtfy
 ) -> None:
     task = _ask(asker, timeout_s=0.3)
-    q_msg_id, _ = await fake.next_question()
+    _, question = await fake.next_question()
     out = await task
     assert (out["value"], out["source"]) == ("", "timeout")
     assert fake.poll_since == [str(OPEN_TIME)]
     _, marker = fake.published[-1]
-    assert marker["sequence_id"] == q_msg_id
+    assert marker["sequence_id"] == question["sequence_id"]
     assert "timed out" in marker["message"]
 
 
@@ -278,11 +279,11 @@ async def test_cancelled_call_retires_the_question_and_leaves_no_task(
     # scope, which re-cancels every await inside it, the cleanup included.
     async with anyio.create_task_group() as tg:
         tg.start_soon(asker.open, QUESTION_TOPIC, "Deploy?", OPTIONS, 30)
-        q_msg_id, _ = await fake.next_question()
+        _, question = await fake.next_question()
         tg.cancel_scope.cancel()
     assert len(fake.published) == 2, "the question was never retired"
     _, marker = fake.published[-1]
-    assert marker["sequence_id"] == q_msg_id
+    assert marker["sequence_id"] == question["sequence_id"]
     assert "stopped" in marker["message"]
     current = asyncio.current_task()
     assert [t for t in asyncio.all_tasks() if t is not current and not t.done()] == []
@@ -292,11 +293,11 @@ async def test_shutdown_retires_the_open_question_and_leaves_no_task(
     asker: NtfyAsk, fake: FakeNtfy
 ) -> None:
     task = _ask(asker, timeout_s=30)
-    q_msg_id, _ = await fake.next_question()
+    _, question = await fake.next_question()
     await asker.shutdown()
     assert task.cancelled()
     _, marker = fake.published[-1]
-    assert marker["sequence_id"] == q_msg_id
+    assert marker["sequence_id"] == question["sequence_id"]
     assert "stopped" in marker["message"]
     current = asyncio.current_task()
     assert [t for t in asyncio.all_tasks() if t is not current and not t.done()] == []

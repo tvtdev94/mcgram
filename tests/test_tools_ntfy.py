@@ -10,6 +10,7 @@ from email.header import decode_header, make_header
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 
 from mcgram import server
@@ -444,3 +445,31 @@ async def test_ntfy_ask_on_a_readable_topic_reports_it_and_posts_nothing(
     assert out["topic"] == fake_ntfy.QUESTION_TOPIC
     assert "NOT posted" in out["hint"]
     assert fake.published == []
+
+
+@pytest.mark.parametrize(
+    ("error", "hint", "retired"),
+    [
+        (httpx.ReadTimeout("timed out"), "MAY have been posted", True),
+        (httpx.ConnectError("refused"), "NOT posted", False),
+    ],
+    ids=["response-lost", "never-connected"],
+)
+async def test_failed_question_publish_says_whether_it_may_be_live(
+    tmp_path: Path, httpx_mock, error: Exception, hint: str, retired: bool
+) -> None:
+    # A read timeout or a dropped connection can come after ntfy stored and
+    # delivered the question; only a failed connect proves it never went out.
+    fake = FakeNtfy(httpx_mock)
+    fake.question_publish_error = error
+    async with _ask_state(_ask_settings(tmp_path), token=fake_ntfy.TOKEN) as state:
+        out = await ask.handle(state, question="Deploy?", options=["Yes", "No"])
+    assert out["error"] == "transport_unreachable"
+    assert hint in out["hint"]
+    _, question = fake.published[0]
+    markers = [p for _, p in fake.published[1:]]
+    if retired:
+        assert [m["sequence_id"] for m in markers] == [question["sequence_id"]]
+        assert "stopped" in markers[0]["message"]
+    else:
+        assert markers == []

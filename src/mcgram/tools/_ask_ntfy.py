@@ -17,6 +17,7 @@ from ..ntfy_ask import (
     NtfyAsk,
     NtfyAskError,
     NtfyAuthFailedError,
+    NtfyPostUnconfirmedError,
     NtfyReplyUnreachableError,
     NtfyTopicNotProtectedError,
 )
@@ -81,8 +82,8 @@ async def ask_ntfy(
         record: dict[str, Any] = {"tool": TOOL_NAME, "status": "error",
                                   "reason": payload["error"], "channel": dest.name,
                                   "transport": "ntfy"}
-        if isinstance(e, TransportError):
-            record["error"] = e.detail
+        if isinstance(e, TransportError | NtfyPostUnconfirmedError):
+            record["error"] = (e if isinstance(e, TransportError) else e.transport).detail
         state.audit.write(record)
         return {**payload, "channel": dest.name}
     state.audit.write({
@@ -102,6 +103,11 @@ def _error_payload(e: Exception) -> dict[str, Any]:
     posted = isinstance(e, NtfyAskError) and e.posted
     where = ("question WAS posted, but no answer can be received" if posted
              else _NOT_POSTED)
+    if isinstance(e, NtfyPostUnconfirmedError):
+        return {"error": "transport_unreachable", "transport": e.transport.transport,
+                "reason": e.transport.detail,
+                "hint": "the question MAY have been posted (ntfy's response was lost); "
+                        "mcgram marked it stopped if it was — check network connectivity"}
     if isinstance(e, NtfyTopicNotProtectedError):
         return {"error": "ntfy_topic_not_protected", "topic": e.topic,
                 "reason": f"topic {e.topic!r} can be read without credentials, so anyone "

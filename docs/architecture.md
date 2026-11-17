@@ -164,12 +164,13 @@ Claude ─ask(q, options≤3)─▶ tools/ask.py ─ntfy─▶ tools/_ask_ntfy.p
   2. register {q_id, one token per option, future}; ReplyListener.ensure_started();
      wait for the stream's `open` event (else ntfy_reply_unreachable, nothing posted)
   3. POST <server>/  {topic, message, actions:[{action:"http", url:<server>/<reply_topic>,
-                     method:"POST", body:'{"q":"q_ab12cd34","t":"<token_i>"}', clear:true}×n]}
+                     method:"POST", body:'{"q":"q_ab12cd34","t":"<token_i>"}', clear:true}×n],
+                     sequence_id:"q_ab12cd34"}
 Phone tap ─POST (anonymous)─▶ <server>/<reply_topic>   (topic: everyone write-only)
 ReplyListener ◀─GET /<reply_topic>/json[?since=<cursor>] (Bearer token, read timeout 90s)─ ntfy
   message event → NtfyAsk._on_message → pending[q] → compare_digest(t, tokens[i]) → future
   4. deadline: one catch-up GET ...?poll=1&since=<cursor>; then the outcome
-  5. outcome marker: POST <server>/ {topic, sequence_id:<question msg id>, priority:2, message}
+  5. outcome marker: POST <server>/ {topic, sequence_id:"q_ab12cd34", priority:2, message}
 ```
 
 - **Listener lifecycle.** The listener starts with the first open question and

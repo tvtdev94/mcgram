@@ -22,9 +22,10 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import anyio
+import httpx
 
 from .ask_registry import answered_text, stopped_text, timed_out_text
-from .errors import MCGramError
+from .errors import MCGramError, TransportError
 from .ntfy_reply_listener import AUDIT_TOOL, ReplyListener
 
 if TYPE_CHECKING:
@@ -43,6 +44,10 @@ _RETIRE_TIMEOUT_S = 5.0
 _MAX_REPLY_BYTES = 1024
 #: The replacement notification is silent: the outcome needs no alert.
 _MARKER_PRIORITY = 2
+#: The request reached the server but its response did not reach us, so ntfy
+#: may have stored and delivered the question. A failed connect proves nothing
+#: was sent.
+_RESPONSE_LOST = (httpx.ReadTimeout, httpx.ReadError, httpx.RemoteProtocolError)
 
 
 class NtfyAskError(MCGramError):
@@ -64,6 +69,14 @@ class NtfyReplyUnreachableError(NtfyAskError):
 
     def __init__(self) -> None:
         super().__init__("ntfy reply topic unreachable")
+
+
+class NtfyPostUnconfirmedError(NtfyAskError):
+    """The question publish lost its response, so it may be on the phone."""
+
+    def __init__(self, transport: TransportError) -> None:
+        super().__init__(f"ntfy question publish unconfirmed: {transport.detail}")
+        self.transport = transport
 
 
 class NtfyAuthFailedError(NtfyAskError):
@@ -115,7 +128,9 @@ class NtfyAsk:
         tokens = [secrets.token_urlsafe(16) for _ in options]
         future: asyncio.Future[tuple[str, str]] = asyncio.get_running_loop().create_future()
         self._pending[q_id] = _Pending(future, options, tokens, asyncio.current_task())
-        posted_id: str | None = None
+        # The question is published under its own id as sequence id, so its
+        # notification can be replaced even when the publish response is lost.
+        attempted = posted = False
         try:
             # Subscribe before posting, so even an instant tap is heard.
             self._listener.ensure_started()
@@ -123,18 +138,27 @@ class NtfyAsk:
                 if future.done():
                     future.result()  # the listener's own failure, e.g. auth
                 raise NtfyReplyUnreachableError()
-            msg = await self._client.publish(
-                topic, question, actions=self._actions(q_id, options, tokens),
-            )
-            posted_id = str(msg.get("id") or "") or None
+            attempted = True
+            try:
+                await self._client.publish(
+                    topic, question, actions=self._actions(q_id, options, tokens),
+                    sequence_id=q_id,
+                )
+            except TransportError as e:
+                if isinstance(e.__cause__, _RESPONSE_LOST):
+                    raise NtfyPostUnconfirmedError(e) from e
+                raise
+            posted = True
             value, source = await self._wait(future, timeout_s)
         except asyncio.CancelledError:
             # Shutdown: nobody will hear a tap on this question any more.
-            await self._retire(topic, posted_id, stopped_text(question))
+            if attempted:
+                await self._retire(topic, q_id, stopped_text(question))
             raise
         except NtfyAskError as e:
-            e.posted = posted_id is not None
-            await self._retire(topic, posted_id, stopped_text(question))
+            e.posted = posted
+            if attempted:
+                await self._retire(topic, q_id, stopped_text(question))
             raise
         finally:
             self._pending.pop(q_id, None)
@@ -142,7 +166,7 @@ class NtfyAsk:
                 with _shielded():
                     await self._listener.stop()
         text = answered_text(question, value) if source == "button" else timed_out_text(question)
-        await self._retire(topic, posted_id, text)
+        await self._retire(topic, q_id, text)
         return {"value": value, "source": source, "question_id": q_id}
 
     async def shutdown(self) -> None:
@@ -181,18 +205,16 @@ class NtfyAsk:
                 return "", "timeout"
         return future.result()
 
-    async def _retire(self, topic: str, posted_id: str | None, text: str) -> None:
+    async def _retire(self, topic: str, sequence_id: str, text: str) -> None:
         """Replace the question's notification with its outcome (best effort).
 
         Servers from 2.16.0 and current apps update it in place by sequence id;
         elsewhere it shows as a new low-priority notification.
         """
-        if posted_id is None:
-            return
         with _shielded():
             try:
                 await self._client.publish(topic, text, priority=_MARKER_PRIORITY,
-                                           sequence_id=posted_id)
+                                           sequence_id=sequence_id)
             except Exception:
                 log.debug("retiring an ntfy question failed (non-fatal)", exc_info=True)
 
