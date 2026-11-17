@@ -25,6 +25,9 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   Telegram, the ntfy default topic and every Discord channel.
 
 ### Fixed
+- A Telegram `ask` cancelled from Claude Code (Esc, or the session closing)
+  now marks the question stopped and removes its buttons. The cleanup used to
+  be cancelled together with the call, leaving live buttons that nobody heard.
 - Reminders no longer fire late by the time the machine spent suspended. On
   Linux and macOS the clock asyncio sleeps on stops during suspend, so a
   reminder held by a live session fired a whole suspend late. The wait now
