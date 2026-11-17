@@ -182,6 +182,13 @@ equivalent:
   never blocks for 100 s.
 - The supervisor ticks every `broker.poll_interval_s`, so a demoted owner withdraws its heartbeat
   within one tick.
+- After code review: the per-session read cursor maps each key to its record's expiry and is pruned
+  by expiry only (the plan pruned it to the keys on disk, which a failed listing turns into a
+  replay); a command is marked read after its audit record is written; `expires_at` is
+  `max(received_at, sent_at) + ttl_s`, so a clock behind Telegram's cannot reopen dedupe; a deleted
+  working folder falls back to the `session` label. Kept as planned: the intake rate token is
+  taken before the duplicate/stale checks, and the heartbeat follows lock ownership rather than
+  `getUpdates` health (documented in `docs/architecture.md`).
 - Tests add a few cases beyond the plan's tables: the disabled inbox leaves no trace, a non-owner
   never removes another pid's heartbeat, label normalization, the `wait_s` cap, the 20-command batch
   with `more`, and two more forgery cases (another bot's key, a renamed record).
