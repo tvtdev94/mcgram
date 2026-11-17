@@ -7,6 +7,8 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-11-17
+
 ### Added
 - **`ask` over ntfy (opt-in).** With `ntfy.ask.enabled: true`, `ask` on an
   ntfy channel posts up to three action buttons. A tap posts to a reply topic
@@ -26,7 +28,7 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   section of `docs/security-threat-model.md` before enabling.
 
 ### Changed
-- `mcgram doctor` no longer sends anything by default. It still checks the
+- **BREAKING: `mcgram doctor` no longer sends anything by default.** It still checks the
   token, `getMe`, ntfy health and every Discord webhook, and reports each send
   test as `[SKIP]`. Pass `--send` for the old behavior: one test message to
   Telegram, the ntfy default topic and every Discord channel.
