@@ -42,6 +42,8 @@ src/mcgram/
 ├── ask_via_broker.py       # `ask` from a non-polling session (never touches Telegram)
 ├── broker_wiring.py        # boot wiring: ask broker supervisor + reminder store
 ├── reminder_spool.py       # reminder records on disk: publish, list, cancel, adopt orphans
+├── inbox.py                # operator inbox: filter + parse /commands, signed records, heartbeat
+├── inbox_wiring.py         # boot wiring: session label, intake handler, heartbeat/sweep supervisor
 │
 ├── tools/
 │   ├── send_message.py
@@ -51,7 +53,8 @@ src/mcgram/
 │   ├── _ask_refusal.py     # why `ask` can't run here (fail-fast refusals)
 │   ├── set_reminder.py
 │   ├── cancel_reminder.py
-│   └── list_reminders.py
+│   ├── list_reminders.py
+│   └── check_inbox.py      # read this session's operator commands (opt-in `inbox`)
 │
 └── data/                   # bundled in wheel
     ├── config.example.yaml
@@ -216,6 +219,47 @@ Requester (`ask_via_broker`):
 
 Owner (`broker_wiring.serve_while_owner`): a supervisor task watches `state.ask_registry` and runs an `AskServer` exactly while this process holds the poll lock. On demotion or shutdown it first cancels the requests in flight: each answers `cancelled` while the poll lock is still held (shutdown stops the broker before it releases the lock), and the posted question is marked stopped and loses its buttons. Then it withdraws its heartbeat, so requesters fail fast instead of waiting out `heartbeat_stale_s`. The server claims each request with `taken`, spends the **owner's** rate-limit budget (one bot token, one budget), and writes an answer on every path. Serving happens in a background task, never inside the update dispatcher. The same supervisor sweeps expired records while not owning, so cleanup also runs where nobody polls.
 
+## Operator inbox
+
+Opt-in (`inbox.enabled: false` by default — read the
+[threat model](security-threat-model.md#operator-inbox) first). The operator types
+`/name[@label] [args]` to the bot and Claude reads it with `check_inbox`. mcgram never acts on a
+command.
+
+```
+~/.mcgram/spool/<config-id>/inbox/
+├── u0.heartbeat.json          polling session, every min(10s, heartbeat_stale_s/6): {pid, at, protocol, expires_at}
+└── u<update_id>.cmd.json      polling session, write_exclusive (O_EXCL): {protocol, update_id, message_id,
+                               chat_id, command, target, args, sent_at, received_at, received_by_pid,
+                               expires_at, sig}
+```
+
+Intake (`inbox.make_intake`, registered once on the dispatcher, so it runs only while this process
+polls): after the poll loop's `chat.id` filter, an update must be a new (not edited) message in a
+`private` chat, from `from.id == operator_chat_id`, not a bot, not `via_bot`, not forwarded, with
+`text` matching `/name[@label] [args]`. `/start` is ignored, and args over 1000 characters are
+dropped. Every refusal is audited as `{tool:"_inbox", status, reason}`; button taps pass silently.
+An accepted command takes a token from its own bucket, is dropped when its Telegram `date` is older
+than `inbox.ttl_s` or 50 records are pending, and is otherwise written once per `update_id`, so a
+new owner that starts at `offset=0` does not store it twice. The record is signed with
+HMAC-SHA256 under a key derived from the bot token, and expires `inbox.ttl_s` after it was received.
+Intake does local file I/O only, never a network call, so it cannot stall `getUpdates`.
+
+Supervisor (`inbox_wiring.supervise`, every session): beats the heartbeat while
+`state.owns_polling` is true and withdraws its own heartbeat on demotion and shutdown; sweeps
+expired records every `sweep_interval_s`.
+
+Reader (`tools/check_inbox`, every session): each session has a label (`MCGRAM_SESSION_LABEL`, else
+the cwd folder name, normalized to `[a-z0-9_]{1,32}`), its start time, and an in-memory set of the
+records it has returned. It returns verified records, oldest first and at most 20 per call, that
+are unseen, for its label or unaddressed, sent no earlier than 60 s before the session started, and
+not expired. A record whose signature fails, or that sits under another update id than the one it
+was signed for, is audited `bad_signature` once and never returned. With `wait_s > 0` it polls every
+`broker.poll_interval_s` up to `wait_s` (capped at `limits.ask_timeout_max_s`), but returns at once
+with `receiving: false` when the heartbeat is missing, stale, from another protocol, or from a dead
+pid. Each returned command gets a 👀 `setMessageReaction` from the reading session, best effort
+(own rate bucket, 5 s timeout, errors only logged).
+
 ## Reminder scheduler
 
 `asyncio.create_task(asyncio.sleep(delay) → send_text(⏰ text))`, tracked in two dicts (`_tasks`, `_meta`) keyed by `r_<hex>`. Delivery goes through `dispatch.send_text`, so any transport works.
@@ -235,6 +279,6 @@ Delivery is at most once, except when a process is killed between sending and wr
 - `~/.mcgram/.env` — bot token + Discord webhook URLs (credentials only; never version-controlled)
   - Format: `MCGRAM_BOT_TOKEN=<token>` + `DISCORD_<CHANNEL_NAME>=<webhook_url>` (env var names are arbitrary, set via `mcgram channel add-discord`)
 - `~/.mcgram/.lock` — single-instance PID file
-- `~/.mcgram/spool/<config-id>/` — `reminders/` (pending reminders, always) and `asks/` (only with `broker.enabled`); dirs 0700, files 0600 on POSIX. `<config-id>` is the first 16 hex of the SHA-256 of the resolved config file path, so sessions on different configs (`MCGRAM_CONFIG`) never share reminders or a broker. Anchored to the home directory, not to `audit.path`; `broker.spool_dir` replaces `~/.mcgram/spool` (the `<config-id>` level stays). Local disk only — NFS/SMB shares are unsupported
+- `~/.mcgram/spool/<config-id>/` — `reminders/` (pending reminders, always), `asks/` (only with `broker.enabled`) and `inbox/` (only with `inbox.enabled`); dirs 0700, files 0600 on POSIX. `<config-id>` is the first 16 hex of the SHA-256 of the resolved config file path, so sessions on different configs (`MCGRAM_CONFIG`) never share reminders or a broker. Anchored to the home directory, not to `audit.path`; `broker.spool_dir` replaces `~/.mcgram/spool` (the `<config-id>` level stays). Local disk only — NFS/SMB shares are unsupported
 - `~/.mcgram/audit.jsonl[.1..3]` — append-only audit log + rotated backups (redacted if `redact_text: true`)
 - `~/.claude/skills/mcgram/SKILL.md` — companion skill, installed by `mcgram init`
