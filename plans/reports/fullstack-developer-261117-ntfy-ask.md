@@ -109,3 +109,27 @@ exactly those three lines (afterwards `git status` was clean for that path) and
 set the statuses in this worktree by hand. The local plan store's index for
 `mcgram/261117-0906` may still point at the sibling path. Plan `status:` is left
 `in-progress` until the PR merges.
+
+## Review follow-up (PR #15, review code-reviewer-261117-1609)
+
+Each finding was re-checked against the code before any change was made.
+M1 was reproduced: under anyio cancellation with a fake that suspends, only
+the question was published and no stopped marker followed.
+
+| Finding | Fix | Regression test (fails before the fix) |
+|---|---|---|
+| M1 ntfy | `_retire` and the listener stop run shielded with a 5 s deadline | `test_cancelled_call_retires_the_question_and_leaves_no_task` (anyio task-group cancel) |
+| M1 Telegram | `_mark_abandoned` is shielded the same way, in its own commit | `test_ask_registry.py::test_cancelled_call_still_retires_the_question` |
+| L1 | question published with `sequence_id = question id`; a lost response raises `NtfyPostUnconfirmedError`, which maps to "MAY have been posted" and retires the question | `test_failed_question_publish_says_whether_it_may_be_live` (the `never-connected` case is the control) |
+| L2 | `_outcome()` shortens the quoted question to keep the message within 4096 bytes | `test_outcome_of_a_maximum_size_question_stays_within_ntfy_message_limit` |
+| L3 | kept, as decided | none |
+| L4 | doctor reads the reply topic with the token, without `--send` | doctor happy path (ask-on) and `token-cannot-read-reply-topic` |
+| L5 | the catch-up read gets a 5 s budget; overhead documented | `test_hanging_catch_up_read_cannot_hold_the_ask_past_its_bound` |
+
+The fake ntfy now suspends on every request, so cleanup that only worked when
+every await completed synchronously can no longer pass by accident.
+
+Gates after the follow-up: ruff clean; `uv run pytest -q --timeout=30` gives
+**681 passed**; mypy reports 37 errors, the same set as `origin/main`;
+`git diff --check` is clean. The branch was not rebased, as asked. No
+`ak plan` command was run, and the plan files were edited by hand.

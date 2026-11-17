@@ -189,3 +189,21 @@ questions were answered as follows.
   commented `ask:` block.
 - **iOS wording.** ntfy#1728 says iOS ignores `clear` and leaves the tapped
   notification in place; it does not say the app opens. The docs say that.
+
+## Review follow-up (PR #15)
+
+- **Cancellation.** MCP cancels a call through an anyio cancel scope, which
+  re-cancels every later await. The cleanup that retires a question (ntfy
+  outcome publish, listener stop, Telegram `_mark_abandoned`) now runs in a
+  shielded `anyio.CancelScope` with a 5 s deadline. `anyio` is now a declared
+  dependency.
+- **Lost publish response.** The question is published with its question id as
+  `sequence_id`. A read timeout, read error or protocol error on that publish
+  reports "may have been posted" and retires the question.
+- **Outcome size.** The outcome message shortens the quoted question to stay
+  within ntfy's 4096-byte message limit.
+- **Time bound.** The deadline catch-up read has its own 5 s budget. The
+  remaining overhead beyond `timeout_s` is documented in `NtfyAsk.open` and in
+  `docs/architecture.md`.
+- **doctor** also reads the reply topic with the token.
+- The extra opt-in hint on the disabled path stays (decided).
