@@ -72,6 +72,16 @@ allow_outside_cwd: false
 # broker:
 #   enabled: false
 
+# === Operator inbox (optional, OFF by default) ================================
+# Lets you send /status, /stop or /note <text> to the bot (/stop@<label> for one
+# session); Claude reads them with the `check_inbox` tool. mcgram never runs a
+# command. Needs the `bot:` section and a private operator chat. Commands sit in
+# ~/.mcgram/spool/ (0600) until they expire. Read the operator-inbox section of
+# docs/security-threat-model.md before enabling.
+# inbox:
+#   enabled: false
+#   ttl_s: 1800                     # an unread command expires after 30 min (60..86400)
+
 # === Named channels (optional) ============================================
 # Add extra destinations beyond the auto-created `default`. Each channel
 # declares its transport. Example:

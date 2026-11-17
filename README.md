@@ -95,7 +95,7 @@ mcgram doctor --send    # ✅ get_me OK, ✅ test message delivered
 
 Declare both `ntfy:` and `bot:` in config — each named channel picks its own transport.
 
-## The 8 tools
+## The 9 tools
 
 | Tool | Telegram | ntfy.sh | Discord | When to use |
 |---|:---:|:---:|:---:|---|
@@ -107,6 +107,7 @@ Declare both `ntfy:` and `bot:` in config — each named channel picks its own t
 | **`set_reminder`** | ✅ | ✅ | ✅ | Schedule a reminder — saved to disk, survives a restart |
 | **`cancel_reminder`** | — | — | — | Cancel a pending reminder |
 | **`list_reminders`** | — | — | — | List currently pending reminders |
+| **`check_inbox`** | ✅ | ❌ | ❌ | Read the `/commands` you sent the bot from Telegram. Listed only with the opt-in `inbox` ([details](#operator-commands-from-telegram)) |
 
 ntfy.sh and Discord have no 2-way input, so `ask` returns `transport_unsupported` on those channels — and `polling_not_owned` in a Telegram session that isn't the one polling, unless the broker is on and the polling session is alive ([why](#multiple-claude-code-sessions)). A question that times out is marked `⏱ timed out` in the chat and loses its buttons. The companion [Claude Code skill](https://github.com/tvtdev94/mcgram/blob/main/src/mcgram/data/skill/SKILL.md) (installed by `mcgram init`) teaches Claude when to call which tool — both **English** and **Vietnamese** trigger phrases are recognized.
 
@@ -216,6 +217,10 @@ allow_outside_cwd: false           # send_file restricted to CWD by default
 broker:                            # opt-in: `ask` from every session — read the threat model first
   enabled: false                   # question/answer text sits in ~/.mcgram/spool/ while open
                                    # (0600, short TTL); audit.redact_text does not apply there
+
+inbox:                             # opt-in: /commands from Telegram — read the threat model first
+  enabled: false
+  ttl_s: 1800                      # a command unread for 30 min expires (60..86400)
 ```
 
 ## Security model
@@ -287,6 +292,51 @@ To bypass the lock entirely, set `MCGRAM_SKIP_LOCK=1` — both instances then
 poll and Telegram returns 409 to one of them (backed off, not crash-looped).
 Rarely what you want.
 
+## Operator commands from Telegram
+
+Opt in with `inbox.enabled: true` (it needs the `bot:` section) and you can steer Claude while it
+works. Type a command to the bot in your private chat:
+
+```text
+/status              what are you doing?
+/stop                stop at the next safe point and report
+/note use staging    take this into account
+/stop@api            only the session labelled "api"
+```
+
+- **Only these three commands count.** Any other `/command` is refused, and so are plain text,
+  edited messages, forwards, captions, `/start`, and anything from a group, another user, or a bot.
+  Each refusal is audited. Typed text still never answers an `ask`.
+- **Every session reads them**, not only the one polling Telegram: the polling session stores each
+  command in `~/.mcgram/spool/<config-id>/inbox/`, and Claude reads it with the `check_inbox` tool.
+  An unaddressed command reaches every session; each session reads it once.
+- **Address one session** with `/cmd@label`, with no space before the `@`. `/stop @api` is
+  refused, not sent to every session. The label is the session's working folder name, lowercased,
+  with anything outside `[a-z0-9_]` turned into `_` (at most 32 characters). So the folder
+  `my-project` is `/stop@my_project`, and `/stop@my-project` is not a command at all. Set
+  `MCGRAM_SESSION_LABEL` in the MCP server's env to choose your own. `check_inbox` returns it as
+  `label`.
+- **Labels can clash.** Two sessions in the same folder, or in folders with the same name, share a
+  label, and `/stop@label` reaches both. Nothing warns about it; set `MCGRAM_SESSION_LABEL` to
+  tell them apart. `/stop@YourBot` (Telegram's autocomplete can add the bot's name) reaches no
+  session, unless one is labelled that.
+- **👀 means read, 👎 means dropped.** The bot reacts 👀 on your message when a session has read
+  it, and 👎 when it could not take the command: unknown, ambiguous target, too long, too old,
+  too many pending, or rate limited (see `mcgram audit --tool _inbox`). A command nobody reads
+  expires after `inbox.ttl_s` (30 min) without a message.
+- **Keep the clock in sync (NTP).** A session never sees a command sent more than 60 s before it
+  started, so a new session does not obey an old `/stop`. That check compares Telegram's time with
+  your machine's. With a clock more than a minute fast, a session misses commands sent right after
+  it starts; with one more than a minute slow, a new session can still see a `/stop` sent shortly
+  before it started.
+- **mcgram never executes a command.** It only filters, stores, expires, and audits. Claude decides
+  what to do, and the bundled skill tells it that a command is a request, never an approval: a risky
+  action still needs an `ask` tap.
+
+The inbox is **off by default** because it turns the bot into a command channel. Read
+[docs/security-threat-model.md](https://github.com/tvtdev94/mcgram/blob/main/docs/security-threat-model.md#operator-inbox)
+before enabling it.
+
 ## Known limitations
 
 - **Reminders survive restarts** — pending reminders are saved in
@@ -300,7 +350,7 @@ Rarely what you want.
 - **`ask` is Telegram-only** — ntfy.sh has no 2-way input. On ntfy channels, `ask` returns `transport_unsupported` without contacting the network.
 - **ntfy.sh public topics are URL-discoverable** — anyone with the topic name can subscribe. mcgram generates 64-bit-entropy topics, but **don't send secrets / PII** unless you self-host ntfy with auth.
 - **ntfy.sh file size cap** — public free tier ~15 MB (vs Telegram's 50 MB). Self-hosted ntfy can raise the cap.
-- **No remote control** — Claude can send, but the bot doesn't accept arbitrary commands FROM Telegram. (Future v0.2.)
+- **Remote commands are pull-only.** With `inbox.enabled`, Claude sees `/commands` only when it calls `check_inbox`. A session idle at the prompt, or blocked in `ask`, does not wake up. Commands expire after `inbox.ttl_s`.
 - **No webhook / VPS support** — Telegram uses long-poll only.
 - **Same Telegram token on 2 machines** → 409 Conflict (only one poller per bot). The `~/.mcgram/.lock` coordination is per-machine, so two hosts can't see each other's lock; mcgram backs off cleanly, but use different bots for different machines. (Several sessions on ONE machine are fine — see [Multiple Claude Code sessions](#multiple-claude-code-sessions).)
 

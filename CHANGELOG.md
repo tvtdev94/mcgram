@@ -7,6 +7,15 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **Operator commands from Telegram (opt-in).** With `inbox.enabled: true`, type `/status`,
+  `/stop` or `/note <text>` to the bot (`/stop@<label>` to address one session) and Claude reads it
+  through the new `check_inbox` tool — in every session, not only the one polling. mcgram never runs
+  a command: it accepts only `/commands` typed in your private chat (no groups, no forwards, no
+  edits, no other commands), stores them signed in `~/.mcgram/spool/<config-id>/inbox/` for
+  `inbox.ttl_s` (30 min), reacts 👀 when a session reads one and 👎 when it has to drop one. Typed text still never answers `ask`. Read the operator-inbox
+  section of `docs/security-threat-model.md` before enabling.
+
 ### Changed
 - `mcgram doctor` no longer sends anything by default. It still checks the
   token, `getMe`, ntfy health and every Discord webhook, and reports each send

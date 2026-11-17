@@ -21,6 +21,7 @@ from .broker_wiring import build_reminder_store, start_ask_broker
 from .config import Settings
 from .discord_client import DiscordClient
 from .errors import ConfigError, MCGramError
+from .inbox_wiring import start_inbox
 from .ntfy_client import NtfyClient
 from .poll_ownership import PollOwnership, cancel_task
 from .polling import poll_loop
@@ -62,6 +63,10 @@ async def _serve(state: AppState) -> None:
         # transfer at runtime, and a shrinking tool list would confuse clients.
         from .tools import ask, cancel_reminder, list_reminders, set_reminder
         modules += [ask, set_reminder, cancel_reminder, list_reminders]
+    if state.settings.inbox.enabled:
+        # Listed even when the inbox can't work here, so Claude gets the reason.
+        from .tools import check_inbox
+        modules.append(check_inbox)
     schemas = [Tool(**m.schema()) for m in modules]
     handlers = {m.TOOL_NAME: m.handle for m in modules}
 
@@ -129,11 +134,13 @@ async def _run() -> None:
         if state.reminders is not None:
             state.reminders.start()  # reloads saved reminders; overdue ones fire now
         broker_task = start_ask_broker(state)
+        inbox_task = start_inbox(state)
         ownership, poll_task = _start_polling(state, settings)
         try:
             await _serve(state)
         finally:
             await cancel_task(broker_task)
+            await cancel_task(inbox_task)
             await cancel_task(poll_task)
             if ownership is not None:
                 ownership.release()

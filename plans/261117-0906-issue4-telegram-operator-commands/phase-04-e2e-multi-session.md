@@ -1,7 +1,7 @@
 ---
 phase: 4
 title: "Cross-process e2e"
-status: pending
+status: completed
 priority: P2
 dependencies: [3]
 effort: 2h

@@ -1,7 +1,7 @@
 ---
 phase: 3
 title: "check_inbox tool"
-status: pending
+status: completed
 priority: P1
 dependencies: [2]
 effort: 3h

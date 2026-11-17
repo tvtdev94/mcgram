@@ -1,7 +1,7 @@
 ---
 phase: 5
 title: "Skill, README, architecture, CHANGELOG"
-status: pending
+status: completed
 priority: P2
 dependencies: [3]
 effort: 2h
@@ -123,25 +123,10 @@ These need a real bot and real Claude Code; tests cannot prove them:
 
 Revert the docs commit.
 
-## Open questions
+## Resolved questions
 
-1. **Routing of unaddressed commands.** The proposal sends them to every live session, so an
-   unaddressed `/stop` stops all of them. The alternatives are: only the poll owner, or the first
-   session to read (claim). Which do you want?
-2. **Addressing syntax.** The proposal is `/cmd@label`. Telegram also uses `@botname` there in
-   groups, so the alternatives are `@label /cmd` or routing by replying to a session's own message.
-   Is the default label (cwd folder name, overridable with `MCGRAM_SESSION_LABEL`) acceptable?
-3. **What text counts as a command.** The proposal accepts only `/commands`. Plain typed text is
-   ignored, which keeps the 0.7.0 rule that typed text does nothing. Should plain text count as a
-   `/note` instead?
-4. **Expiry.** Is `inbox.ttl_s` default 1800 s (allowed range 60–86400 s) right? And is the 60 s
-   clock allowance for "sent before this session started" acceptable?
-5. **Read receipt.** Keep the 👀 reaction? Should mcgram also tell you in the chat when a command
-   expires unread? (The plan does not do this today.)
-6. **`/sessions`.** Should mcgram itself answer `/sessions` with the live labels? It would be the
-   only command mcgram handles itself. The plan proposes no for now.
-7. **Command vocabulary.** The plan proposes `/status`, `/stop`, and `/note`. Do you want `/pause`
-   and `/continue` too? Should mcgram register the commands with `setMyCommands` so Telegram
-   autocompletes them?
-8. **Stale skill line.** `SKILL.md:25` still shows `ask` without options, which contradicts 0.7.0.
-   Should this phase fix it, since it edits the same file?
+All eight were answered by the user on 2026-11-17; see
+[Decisions in plan.md](plan.md#decisions-user-approved-2026-11-17). The docs follow them: every
+live session gets an unaddressed command, `/cmd@label` with the folder-name default, `/commands`
+only, 1800 s expiry with no message on expiry, 👀 kept, no `/sessions`, no `setMyCommands`, and
+the `SKILL.md` "ask without options" row is left to PR #13.
