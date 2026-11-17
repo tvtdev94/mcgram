@@ -315,7 +315,8 @@ works. Type a command to the bot in your private chat:
   env to choose your own. `check_inbox` returns it as `label`.
 - **👀 means read.** The bot reacts 👀 on your message when a session has read it. A command nobody
   reads expires after `inbox.ttl_s` (30 min) without a message. A session never sees a command
-  sent before it started, so a new session does not obey an old `/stop`.
+  sent more than 60 s before it started (a clock allowance), so a new session does not obey an
+  old `/stop`.
 - **mcgram never executes a command.** It only filters, stores, expires, and audits. Claude decides
   what to do, and the bundled skill tells it that a command is a request, never an approval: a risky
   action still needs an `ask` tap.

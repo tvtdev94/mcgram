@@ -242,16 +242,21 @@ dropped. Every refusal is audited as `{tool:"_inbox", status, reason}`; button t
 An accepted command takes a token from its own bucket, is dropped when its Telegram `date` is older
 than `inbox.ttl_s` or 50 records are pending, and is otherwise written once per `update_id`, so a
 new owner that starts at `offset=0` does not store it twice. The record is signed with
-HMAC-SHA256 under a key derived from the bot token, and expires `inbox.ttl_s` after it was received.
+HMAC-SHA256 under a key derived from the bot token, and expires `inbox.ttl_s` after the later of
+its Telegram `date` and its receipt, so a clock behind Telegram's cannot reopen the dedupe window.
 Intake does local file I/O only, never a network call, so it cannot stall `getUpdates`.
 
 Supervisor (`inbox_wiring.supervise`, every session): beats the heartbeat while
 `state.owns_polling` is true and withdraws its own heartbeat on demotion and shutdown; sweeps
-expired records every `sweep_interval_s`.
+expired records every `sweep_interval_s`. The heartbeat follows poll-lock ownership, not the health
+of `getUpdates`: an owner stuck in 409 backoff or offline still reads as `receiving: true`, as
+with the broker heartbeat.
 
 Reader (`tools/check_inbox`, every session): each session has a label (`MCGRAM_SESSION_LABEL`, else
-the cwd folder name, normalized to `[a-z0-9_]{1,32}`), its start time, and an in-memory set of the
-records it has returned. It returns verified records, oldest first and at most 20 per call, that
+the cwd folder name, normalized to `[a-z0-9_]{1,32}`), its start time, and an in-memory map of the
+records it has returned to their expiry. Entries leave the map only once expired, never because a
+directory listing came back empty, so a failed listing cannot replay commands. A command is marked
+read only after its audit record is written. It returns verified records, oldest first and at most 20 per call, that
 are unseen, for its label or unaddressed, sent no earlier than 60 s before the session started, and
 not expired. A record whose signature fails, or that sits under another update id than the one it
 was signed for, is audited `bad_signature` once and never returned. With `wait_s > 0` it polls every

@@ -39,13 +39,27 @@ _HEARTBEAT_MAX_PERIOD_S = 10.0
 
 @dataclass
 class InboxSession:
-    """This session's view of the inbox. `store` is None when `unavailable` says why."""
+    """This session's view of the inbox. `store` is None when `unavailable` says why.
+
+    `seen` maps each record this session has read (or found forged) to the time
+    it stops mattering: the record's own expiry. It is pruned by that time only,
+    never by what a directory listing shows — a listing that fails reads as an
+    empty inbox, and forgetting on that basis would replay every command.
+    """
 
     label: str
     started_at: float
     store: InboxStore | None
     unavailable: str | None = None
-    seen: set[str] = field(default_factory=set)
+    seen: dict[str, float] = field(default_factory=dict)
+
+    def mark_seen(self, key: str, until: float) -> None:
+        self.seen[key] = max(until, self.seen.get(key, until))
+
+    def forget_expired(self, now: float) -> None:
+        """Drop entries past their expiry; such a record is never shown again anyway."""
+        for key in [k for k, until in self.seen.items() if until < now]:
+            del self.seen[key]
 
 
 def session_label() -> str:
@@ -53,7 +67,12 @@ def session_label() -> str:
 
     This is the name the operator addresses with `/cmd@label`.
     """
-    raw = os.environ.get(LABEL_ENV, "").strip() or Path.cwd().name
+    raw = os.environ.get(LABEL_ENV, "").strip()
+    if not raw:
+        try:
+            raw = Path.cwd().name
+        except OSError:  # the working folder was deleted under us
+            raw = ""
     label = _NOT_LABEL_RE.sub("_", raw.lower())[:_LABEL_MAX]
     return label or _LABEL_FALLBACK
 
@@ -129,7 +148,7 @@ async def supervise(state: AppState, session: InboxSession, store: InboxStore) -
                 if now - last_sweep >= cfg.sweep_interval_s:
                     last_sweep = now
                     store.spool.sweep(tmp_grace_s=cfg.tmp_grace_s)
-                    session.seen &= store.keys()
+                    session.forget_expired(time.time())
             except Exception:
                 log.exception("inbox supervisor tick failed")
             await asyncio.sleep(cfg.poll_interval_s)

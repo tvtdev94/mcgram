@@ -11,6 +11,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import os
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -48,6 +50,7 @@ audit:
 broker:
   spool_dir: {(tmp_path / 'spool').as_posix()}
   poll_interval_s: 0.02
+  sweep_interval_s: 1
 limits:
   ask_timeout_max_s: {wait_cap}
 inbox:
@@ -161,6 +164,50 @@ async def test_commands_sent_before_the_session_started_are_hidden(
     await world.send("/stop", update_id=1, date=int(started) - 120)  # an old /stop
     await world.send("/status", update_id=2, date=int(started) - 30)  # clock allowance
     assert _ids(await check_inbox.handle(me)) == ["u2"]
+
+
+async def test_expired_records_are_hidden_before_the_sweep(world: World) -> None:
+    me = await world.reader()
+    store = world.owner.inbox.store
+    long_ago = time.time() - world.settings.inbox.ttl_s - 10
+    cmd = Command(update_id=1, message_id=5, chat_id=OPERATOR, command="stop",
+                  target=None, args="", sent_at=int(long_ago))
+    assert store.publish(cmd, long_ago) == "queued"
+    assert (await check_inbox.handle(me))["commands"] == []
+
+
+async def test_a_failed_audit_write_does_not_lose_the_command(
+    world: World, httpx_mock: Any, tmp_path: Path
+) -> None:
+    httpx_mock.add_response(url=REACT_URL, json=_OK)
+    me = await world.reader()
+    await world.send("/stop")
+    good = me.audit
+    broken = tmp_path / "audit-is-a-dir"
+    broken.mkdir()
+    me.audit = AuditLog(broken)  # every append now fails with an OSError
+    with pytest.raises(OSError):
+        await check_inbox.handle(me)
+    me.audit = good
+    assert _ids(await check_inbox.handle(me)) == ["u1"]
+
+
+@pytest.mark.skipif(sys.platform == "win32" or os.geteuid() == 0,
+                    reason="needs POSIX directory permissions that bind this user")
+async def test_a_failed_listing_never_replays_read_commands(
+    world: World, httpx_mock: Any
+) -> None:
+    httpx_mock.add_response(url=REACT_URL, json=_OK)
+    me = await world.reader()
+    await world.send("/stop")
+    assert _ids(await check_inbox.handle(me)) == ["u1"]
+    folder = Spool(world.settings.spool_root, INBOX_NAMESPACE).dir
+    folder.chmod(0o300)  # listing fails; the supervisors' sweeps run meanwhile
+    try:
+        await asyncio.sleep(1.3)
+    finally:
+        folder.chmod(0o700)
+    assert (await check_inbox.handle(me))["commands"] == []
 
 
 def _tamper(path: Path) -> None:

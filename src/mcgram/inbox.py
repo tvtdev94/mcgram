@@ -18,6 +18,7 @@ import os
 import re
 import time
 import unicodedata
+from collections.abc import Collection
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, TypeGuard
 
@@ -182,9 +183,10 @@ class InboxStore:
     def publish(self, cmd: Command, now: float) -> str:
         """Store `cmd`. Returns "queued", "duplicate", or a drop reason.
 
-        A record lives for `ttl_s` after it was received and its update must be
-        younger than `ttl_s`, so a redelivery that arrives after the record was
-        swept is already stale: sweep timing cannot reopen the dedupe window.
+        A record lives for `ttl_s` past the later of its Telegram date and its
+        receipt, and an update must be younger than `ttl_s`, so a redelivery
+        that arrives after the record was swept is already stale — even when
+        our clock runs behind Telegram's: sweep timing cannot reopen dedupe.
         """
         if now - cmd.sent_at > self._ttl_s:
             return "stale"
@@ -202,7 +204,7 @@ class InboxStore:
             "sent_at": cmd.sent_at,
             "received_at": now,
             "received_by_pid": os.getpid(),
-            "expires_at": now + self._ttl_s,
+            "expires_at": max(now, cmd.sent_at) + self._ttl_s,
         }
         record["sig"] = _signature(self._key, record)
         if self.spool.write_exclusive(key, RECORD_KIND, record):
@@ -221,7 +223,7 @@ class InboxStore:
         return {k for k in self.spool.keys(RECORD_KIND) if k[1:].isdigit()}
 
     def unread(
-        self, seen: set[str], label: str, since: float, now: float
+        self, seen: Collection[str], label: str, since: float, now: float
     ) -> tuple[list[dict[str, Any]], list[str]]:
         """(commands for this session oldest first, keys whose signature failed).
 
@@ -230,7 +232,7 @@ class InboxStore:
         """
         found: list[dict[str, Any]] = []
         forged: list[str] = []
-        for key in sorted(self.keys() - seen, key=_update_id):
+        for key in sorted(self.keys().difference(seen), key=_update_id):
             rec = self.spool.read(key, RECORD_KIND)
             if rec is None or rec.get("protocol") != PROTOCOL_VERSION:
                 continue
@@ -238,7 +240,7 @@ class InboxStore:
                 forged.append(key)
                 continue
             if self._visible(rec, label, since, now):
-                found.append({"id": key, **rec})
+                found.append({**rec, "id": key})
         return found, forged
 
     def _authentic(self, key: str, rec: dict[str, Any]) -> bool:

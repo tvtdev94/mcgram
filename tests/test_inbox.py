@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -19,7 +20,7 @@ import pytest
 
 from mcgram.audit import AuditLog
 from mcgram.config import Settings
-from mcgram.inbox import HEARTBEAT_KEY, HEARTBEAT_KIND, MAX_PENDING
+from mcgram.inbox import HEARTBEAT_KEY, HEARTBEAT_KIND, MAX_PENDING, Command
 from mcgram.inbox_wiring import INBOX_NAMESPACE, session_label, start_inbox
 from mcgram.poll_ownership import cancel_task
 from mcgram.polling import poll_loop
@@ -138,7 +139,7 @@ _CALLBACK = {"update_id": 1, "callback_query": {
 
 
 @pytest.mark.parametrize(("update", "expected"), [
-    pytest.param(_msg(text="/Note@Alpha  ship it"), ("queued", None), id="accepted"),
+    pytest.param(_msg(text="/Note@Alpha  ship\u200b it\x07"), ("queued", None), id="accepted"),
     pytest.param(_msg(chat={"id": OPERATOR, "type": "supergroup"}),
                  ("rejected", "not_private"), id="group-chat"),
     pytest.param(_msg(**{"from": {"id": 7, "is_bot": False}}),
@@ -156,6 +157,7 @@ _CALLBACK = {"update_id": 1, "callback_query": {
     pytest.param(_msg(text="please stop"), ("ignored", "not_command"), id="plain-text"),
     pytest.param(_msg(text="/start"), ("ignored", "reserved"), id="start"),
     pytest.param(_msg(text="/note " + "x" * 1001), ("dropped", "too_long"), id="too-long"),
+    pytest.param(_msg(date="yesterday"), ("rejected", "malformed"), id="malformed"),
     pytest.param(_CALLBACK, None, id="button-tap-is-silent"),
 ])
 async def test_intake_filter(owner: AppState, update: dict[str, Any], expected: Any) -> None:
@@ -189,6 +191,20 @@ async def test_redelivery_to_a_new_owner_is_stored_once(tmp_path: Path) -> None:
             await cancel_task(task)
     assert _records(settings) == ["u5.cmd.json"]
     assert [r["status"] for r in _inbox_audit(settings)] == ["queued"]
+
+
+async def test_redelivery_stays_a_duplicate_when_telegram_runs_ahead(owner: AppState) -> None:
+    """Our clock 100 s behind Telegram's: the record must outlive the window in
+    which a redelivery of the same update still counts as fresh."""
+    store = owner.inbox.store
+    ttl = owner.settings.inbox.ttl_s
+    local = time.time()
+    cmd = Command(update_id=8, message_id=1, chat_id=OPERATOR, command="stop",
+                  target=None, args="", sent_at=int(local) + 100)
+    assert store.publish(cmd, local) == "queued"
+    later = local + ttl + 50  # still within ttl of Telegram's date
+    store.spool.sweep(later)
+    assert store.publish(cmd, later) == "duplicate"
 
 
 async def test_update_older_than_ttl_is_dropped(owner: AppState) -> None:
@@ -307,3 +323,15 @@ def test_session_label_is_normalized(
     cwd.mkdir(exist_ok=True)
     monkeypatch.chdir(cwd)
     assert session_label() == expected
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows cannot remove the working folder")
+def test_a_deleted_working_folder_falls_back_to_the_default_label(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.delenv("MCGRAM_SESSION_LABEL", raising=False)
+    gone = tmp_path / "gone"
+    gone.mkdir()
+    monkeypatch.chdir(gone)
+    gone.rmdir()
+    assert session_label() == "session"

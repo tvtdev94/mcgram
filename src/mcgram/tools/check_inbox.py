@@ -77,8 +77,6 @@ async def handle(state: AppState, wait_s: Any = 0) -> dict[str, Any]:
     t0 = time.monotonic()
     found = await _wait_for_commands(state, session, wait_s)
     batch, result["more"] = found[:MAX_RESULTS], len(found) > MAX_RESULTS
-    # Marked before the receipts, so a cancelled receipt can't cause a redelivery.
-    session.seen.update(rec["id"] for rec in batch)
     now = time.time()
     result["commands"] = [
         {"id": rec["id"], "command": rec["command"], "target": rec["target"],
@@ -92,6 +90,10 @@ async def handle(state: AppState, wait_s: Any = 0) -> dict[str, Any]:
             "update_ids": [rec["update_id"] for rec in batch], "pid": os.getpid(),
             "waited_ms": int((time.monotonic() - t0) * 1000),
         })
+        # Only now, once nothing can fail the call, and before the receipts, so
+        # neither a failed audit write nor a cancelled receipt loses a command.
+        for rec in batch:
+            session.mark_seen(rec["id"], rec["expires_at"])
         await asyncio.gather(*(_read_receipt(state, rec) for rec in batch))
     return result
 
@@ -120,7 +122,7 @@ def _read(state: AppState, session: InboxSession) -> list[dict[str, Any]]:
                                          session.started_at, time.time())
     for key in forged:
         # Once per session: marking it seen keeps it from being audited each call.
-        session.seen.add(key)
+        session.mark_seen(key, time.time() + state.settings.inbox.ttl_s)
         log.warning("inbox: %s failed its signature check; ignoring it", key)
         state.audit.write({"tool": TOOL_NAME, "status": "rejected",
                            "reason": "bad_signature", "update_id": int(key[1:])})
